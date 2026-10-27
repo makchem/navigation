@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+# Machine-local Claude Code permission grants
+.claude/settings.local.json
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Large map tiles / imagery / recorded flights — keep out of git
+data/*
+!data/.gitkeep
+out/
+*.tif
+*.tiff
+*.mp4
+*.avi
