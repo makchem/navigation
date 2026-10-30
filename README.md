@@ -54,12 +54,73 @@ uv run scripts/camera_test.py 0     # q/ESC quits, SPACE saves a frame to out/
 ## Layout
 
 ```
-src/navigation/     package code
+src/matching.py     match_frame, estimate_pose
+src/simulation.py   fake_drone_frame — synthetic views with known ground truth
+src/metrics.py      gsd, error_m
+notebooks/          exploration, 01 -> 04
 scripts/            env verification + camera utilities
 tests/              headless regression tests for the vision stack
-data/               map tiles / imagery (gitignored)
+data/               map imagery (gitignored)
 out/                generated frames and debug output (gitignored)
 ```
+
+`src/` is a **flat layout installed editable**: `src/matching.py` imports as
+top-level `matching` from any working directory, so notebooks need no
+`sys.path` juggling. The mapping comes from `sources = ["src"]` in
+`pyproject.toml`. Adding a module means dropping a new `.py` in `src/` —
+no config change, though a brand-new file needs a kernel restart to be
+importable the first time.
+
+Tradeoff worth knowing: top-level names like `metrics` are generic and could
+collide with a future dependency. Fine for an exploration project; if it ever
+bites, move to `src/dronenav/` and import `from dronenav import metrics`.
+
+## Notebook workflow
+
+```bash
+uv run jupyter lab          # kernel is this project's .venv automatically
+```
+
+Every notebook opens with the same setup cell: imports, a `DATA` path, a
+`show()` helper for inline OpenCV display, and —
+
+```python
+%load_ext autoreload
+%autoreload 2
+```
+
+That last part is the point of this structure. Write a function in
+`src/simulation.py`, re-run the notebook cell, and the new code is live with no
+kernel restart and no re-loading the 41 MPix map. Notebooks stay as narrative
+and plots; anything you want to reuse or test moves into `src/`.
+
+`ipympl` is installed, so `%matplotlib widget` gives you a pan/zoom canvas —
+much nicer than re-cropping to inspect a region of a big map.
+
+### The notebooks
+
+| Notebook | Purpose |
+| --- | --- |
+| `01_explore_map.ipynb` | Map properties, GSD, sample crops, where features actually are |
+| `02_template_baseline.ipynb` | `matchTemplate` floor to beat; find where it breaks |
+| `03_orb_vs_akaze.ipynb` | Detector comparison on accuracy, robustness, runtime |
+| `04_robustness.ipynb` | Failure envelope, negative tests, confidence calibration |
+
+They ship as agendas — markdown prompts with empty code cells — not solutions.
+
+### Reference map
+
+`data/dresden-map.png` is 8192 × 5074 (41.6 MPix), **RGBA**. Two notes:
+
+- `cv2.imread` drops the alpha channel by default. Usually what you want, but
+  be deliberate; pass `cv2.IMREAD_UNCHANGED` if you need all four channels.
+- Decoded it is only ~0.12 GB, so loading it in a kernel is comfortable.
+- If the map spans 5 km across its width, GSD ≈ **0.61 m/px**. Confirm the real
+  ground extent — every error figure in metres depends on this one number.
+
+`data/` is gitignored apart from `.gitkeep`, so map imagery stays out of the
+repo. Notebook outputs *are* committed as-is; if the diffs get noisy, look at
+`nbstripout`.
 
 ## What's installed and why
 
@@ -67,6 +128,7 @@ out/                generated frames and debug output (gitignored)
 - `numpy`, `scipy` — array math, spatial queries (KD-trees for match pruning)
 - `matplotlib` — debug plots of tracks and match quality
 - `pyproj` — pixel ↔ lat/lon ↔ UTM transforms, for tying matches to real coords
+- `jupyterlab`, `ipykernel`, `ipympl` (dev) — the exploration front end
 
 Likely additions once the approach firms up, deliberately left out for now to
 keep the install light: `rasterio` (GeoTIFF map tiles), `shapely` (geometry),
