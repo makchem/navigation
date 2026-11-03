@@ -1,8 +1,8 @@
 .venv/
 __pycache__/
-# Machine-local Claude Code permission grants
 .claude/settings.local.json
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ipynb_checkpoints/
 
@@ -10,7 +10,12 @@ __pycache__/
 data/*
 !data/.gitkeep
 out/
+logs/*
+!logs/.gitkeep
 *.tif
 *.tiff
 *.mp4
 *.avi
+
+# Local config overrides
+config/local.yaml

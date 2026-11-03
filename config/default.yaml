@@ -1,0 +1,39 @@
+# Navigation module configuration
+# Copy to config/local.yaml and fill in site-specific values.
+
+map:
+  # Path relative to repo root
+  path: data/dresden-map.png
+  # WGS84 corners of the map image (north-up)
+  # FILL IN from Google Earth: right-click corners -> copy coordinates
+  top_left_lat: null      # e.g. 51.065
+  top_left_lon: null      # e.g. 13.720
+  bottom_right_lat: null  # e.g. 51.030
+  bottom_right_lon: null  # e.g. 13.785
+
+camera:
+  # Simulated camera parameters
+  fov_deg: 60.0           # diagonal field of view
+  image_width_px: 640
+  image_height_px: 480
+  # Physical sensor (for gsd_from_camera; null = use FOV-based calc)
+  focal_length_mm: null
+  sensor_width_mm: null
+
+sitl:
+  # ArduPilot SITL connection
+  connection: udp:127.0.0.1:14551
+  # Starting location: LAT,LON,ALT,HDG
+  # Must be inside the map with enough margin for the camera footprint
+  custom_location: null   # e.g. "51.048,13.752,200,0"
+  loop_hz: 5
+
+scenarios:
+  gps_normal:
+    noise_sigma_m: 2.0
+  gps_jammed:
+    start_s: 30.0
+    duration_s: 60.0
+  gps_spoofed:
+    start_s: 30.0
+    drift_rate_mps: 0.5   # metres per second of growing offset

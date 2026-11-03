@@ -6,7 +6,7 @@ eyeballed. Build this first — the other modules get tested against it.
 """
 
 
-def fake_drone_frame(
+def render_frame(
     map_img,
     x: float,
     y: float,
@@ -21,3 +21,7 @@ def fake_drone_frame(
     tests can compare against it directly.
     """
     raise NotImplementedError
+
+
+# Old name kept for notebook compatibility during transition
+fake_drone_frame = render_frame

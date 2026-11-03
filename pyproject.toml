@@ -1,17 +1,15 @@
 [project]
-name = "navigation"
+name = "navmod"
 version = "0.1.0"
-description = "AI-assisted visual navigation on a map without GPS"
+description = "GPS-denied optical navigation module for fixed-wing UAVs"
 requires-python = ">=3.12"
 dependencies = [
-    # Core vision. opencv-contrib-python bundles the main modules plus contrib
-    # (xfeatures2d, tracking, optflow). Never install opencv-python alongside it.
     "opencv-contrib-python>=4.10",
     "numpy>=2.0",
     "scipy>=1.14",
     "matplotlib>=3.9",
-    # Map/geo coordinate transforms (pixel <-> lat/lon, UTM, etc.)
     "pyproj>=3.6",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -20,8 +18,6 @@ dev = [
     "pytest>=8.3",
     "jupyterlab>=4.2",
     "ipykernel>=6.29",
-    # %matplotlib widget — pan/zoom a 41 MPix map inline instead of
-    # re-rendering a static crop every time you want a closer look.
     "ipympl>=0.9",
 ]
 
@@ -33,8 +29,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# Flat layout: src/matching.py installs as top-level `matching`, so notebooks
-# can `from matching import match_frame` from any working directory without
-# sys.path hacks. `sources` strips the src/ prefix.
-only-include = ["src"]
-sources = ["src"]
+packages = ["src/navmod"]

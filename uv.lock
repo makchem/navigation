@@ -1341,7 +1341,7 @@ wheels = [
 ]
 
 [[package]]
-name = "navigation"
+name = "navmod"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1349,6 +1349,7 @@ dependencies = [
     { name = "numpy" },
     { name = "opencv-contrib-python" },
     { name = "pyproj" },
+    { name = "pyyaml" },
     { name = "scipy" },
 ]
 
@@ -1367,6 +1368,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "opencv-contrib-python", specifier = ">=4.10" },
     { name = "pyproj", specifier = ">=3.6" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "scipy", specifier = ">=1.14" },
 ]
 
