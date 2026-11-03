@@ -134,3 +134,12 @@ Likely additions once the approach firms up, deliberately left out for now to
 keep the install light: `rasterio` (GeoTIFF map tiles), `shapely` (geometry),
 `torch` (learned descriptors like SuperPoint/LightGlue, which outperform SIFT for
 cross-season and cross-viewpoint map matching).
+
+## ArduPilot SITL
+
+Start
+
+```
+cd ~/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduPlane --console --map --out=udp:127.0.0.1:14551
+```
