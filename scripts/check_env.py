@@ -32,13 +32,10 @@ def check_detectors() -> None:
     cv2.rectangle(img, (190, 30), (260, 90), 120, -1)
     img = cv2.GaussianBlur(img, (3, 3), 0)
 
-    # NOTE (OpenCV 5): AKAZE/KAZE/BRISK moved from the main features2d module
-    # into xfeatures2d (contrib). cv2.AKAZE no longer exists as it did in 4.x.
     for name, factory in [
         ("ORB", cv2.ORB.create),
         ("SIFT", cv2.SIFT.create),
-        ("AKAZE", cv2.xfeatures2d.AKAZE.create),
-        ("BRISK", cv2.xfeatures2d.BRISK.create),
+        ("AKAZE", cv2.AKAZE.create),
     ]:
         try:
             kps, desc = factory().detectAndCompute(img, None)
@@ -107,21 +104,10 @@ def check_io() -> None:
     print(f"imencode/imdecode {'ok' if ok and cv2.imdecode(buf, 1).shape == img.shape else 'FAIL'}")
 
     build = cv2.getBuildInformation()
-    for key in ("GUI:", "FFMPEG:", "V4L/V4L2"):
+    for key in ("GTK", "FFMPEG", "V4L"):
         line = next((l.strip() for l in build.splitlines() if key in l), None)
-        print(f"{key:10} {line or 'not reported'}")
-
-    cams = [i for i in range(4) if _camera_works(i)]
-    print(f"cameras    working indices: {cams or 'none found'}")
-    print("note: imshow needs a GUI session; run scripts/camera_test.py to see a live window")
-
-
-def _camera_works(index: int) -> bool:
-    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-    try:
-        return bool(cap.isOpened() and cap.read()[0])
-    finally:
-        cap.release()
+        print(f"{key:7} {line or 'not reported'}")
+    print("note: imshow windows need a GUI session; use scripts/camera_test.py to try it")
 
 
 if __name__ == "__main__":

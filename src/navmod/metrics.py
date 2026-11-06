@@ -17,6 +17,8 @@ so notebooks can import it without pulling in the matching stack.
 # figure survives what a height-based one would silently corrupt.
 
 
+import numpy as np
+
 def gsd(ground_width_m: float, image_width_px: int) -> float:
     """Ground sampling distance in metres per pixel.
 
@@ -57,7 +59,8 @@ def gsd_from_camera(
         raise ValueError("all arguments must be positive")
     return (sensor_width_mm * altitude_m) / (focal_length_mm * image_width_px)
 
-
 def error_m(estimated_xy, true_xy, gsd_m_per_px: float) -> float:
     """Euclidean localization error, in metres, between two pixel positions."""
-    raise NotImplementedError
+    
+    dist_px = np.linalg.norm(np.array(estimated_xy) - np.array(true_xy))
+    return float(dist_px * gsd_m_per_px)
