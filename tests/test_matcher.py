@@ -15,8 +15,21 @@ FRAME_SIZE = (512, 512)
 
 @pytest.fixture(scope="module")
 def synth_map():
+    import cv2
+
     rng = np.random.RandomState(42)
-    return rng.randint(0, 256, (*SYNTH_SIZE, 3), dtype=np.uint8)
+    img = np.full((*SYNTH_SIZE, 3), 200, dtype=np.uint8)
+    for _ in range(300):
+        x1, y1 = rng.randint(0, SYNTH_SIZE[1]), rng.randint(0, SYNTH_SIZE[0])
+        w, h = rng.randint(10, 80), rng.randint(10, 80)
+        color = tuple(int(c) for c in rng.randint(0, 180, 3))
+        cv2.rectangle(img, (x1, y1), (x1 + w, y1 + h), color, -1)
+    for _ in range(200):
+        cx, cy = rng.randint(0, SYNTH_SIZE[1]), rng.randint(0, SYNTH_SIZE[0])
+        r = int(rng.randint(5, 40))
+        color = tuple(int(c) for c in rng.randint(0, 180, 3))
+        cv2.circle(img, (cx, cy), r, color, -1)
+    return img
 
 
 class TestMatcherEndToEnd:
