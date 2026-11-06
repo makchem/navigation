@@ -4,7 +4,7 @@ This is the ground-truth generator: you know exactly which (x, y, heading,
 altitude) a frame came from, so localization error is measurable rather than
 eyeballed. Build this first — the other modules get tested against it.
 """
-
+import cv2
 
 def render_frame(
     map_img,
@@ -20,7 +20,15 @@ def render_frame(
     Returns the frame; consider also returning the transform you used, so
     tests can compare against it directly.
     """
-    raise NotImplementedError
+
+    M = cv2.getRotationMatrix2D(center=(x, y),
+                                angle=heading_deg, 
+                                scale=1.0/scale)
+    M[0, 2] += size[0] / 2 - x
+    M[1, 2] += size[1] / 2 - y
+    rotated = cv2.warpAffine(map_img, M, size)
+
+    return rotated
 
 
 # Old name kept for notebook compatibility during transition

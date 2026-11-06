@@ -70,3 +70,11 @@ Tools/autotest/sim_vehicle.py -v ArduPlane -N --console --map \
 
 The SITL bridge (`scripts/bridge.py`) connects the navigation module to
 ArduPilot via pymavlink. See CLAUDE.md for integration details.
+
+## QGIS
+
+```
+iface.mapCanvas().setCenter(QgsPointXY(1530500, 6625500))
+iface.mapCanvas().zoomScale(50000)
+iface.mapCanvas().refresh()
+```
