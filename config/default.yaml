@@ -5,11 +5,12 @@ map:
   # Path relative to repo root
   path: data/dresden-map.png
   # WGS84 corners of the map image (north-up)
-  # FILL IN from Google Earth: right-click corners -> copy coordinates
-  top_left_lat: null      # e.g. 51.065
-  top_left_lon: null      # e.g. 13.720
-  bottom_right_lat: null  # e.g. 51.030
-  bottom_right_lon: null  # e.g. 13.785
+  # Extracted from data/dresden-esri.tif GeoTIFF (EPSG:3857 -> WGS84)
+  # Image: 8192 x 5097 RGBA, ~4016 m x 2499 m, GSD ~0.49 m/px
+  top_left_lat: 51.0800079
+  top_left_lon: 13.6911106
+  bottom_right_lat: 51.0575373
+  bottom_right_lon: 13.7485796
 
 camera:
   # Simulated camera parameters
@@ -25,7 +26,7 @@ sitl:
   connection: udp:127.0.0.1:14551
   # Starting location: LAT,LON,ALT,HDG
   # Must be inside the map with enough margin for the camera footprint
-  custom_location: null   # e.g. "51.048,13.752,200,0"
+  custom_location: "51.0688,13.7198,200,0"  # map centre, 200m AGL, heading north
   loop_hz: 5
 
 scenarios:

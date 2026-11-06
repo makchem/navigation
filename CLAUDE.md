@@ -103,8 +103,8 @@ Tools/autotest/sim_vehicle.py -v ArduPlane -N --console --map \
 
 ## Map
 
-Test map: Google Earth export of Dresden area.
-- `data/dresden-map-partial.png`: 1716×1063 RGBA (working subset)
-- `data/dresden-map.png`: needs re-download (was truncated)
-- Georef corners: **FILL IN** from Google Earth
-- If ~5 km wide across 8192 px → GSD ≈ 0.61 m/px
+Test map: Esri WMS export of Dresden area.
+- `data/dresden-esri.tif`: source GeoTIFF (EPSG:3857), 8192×5097
+- `data/dresden-map.png`: converted RGBA PNG (same resolution)
+- Georef (from GeoTIFF): TL 51.0800079°N 13.6911106°E, BR 51.0575373°N 13.7485796°E
+- ~4016 m × 2499 m, GSD ≈ 0.49 m/px
