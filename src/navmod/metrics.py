@@ -59,8 +59,8 @@ def gsd_from_camera(
         raise ValueError("all arguments must be positive")
     return (sensor_width_mm * altitude_m) / (focal_length_mm * image_width_px)
 
+
 def error_m(estimated_xy, true_xy, gsd_m_per_px: float) -> float:
     """Euclidean localization error, in metres, between two pixel positions."""
-    
     dist_px = np.linalg.norm(np.array(estimated_xy) - np.array(true_xy))
     return float(dist_px * gsd_m_per_px)
