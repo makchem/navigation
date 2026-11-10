@@ -25,6 +25,10 @@ def match_frame(frame, map_img, detector=None):
 
     pts_frame = np.float32([kp_frame[m.queryIdx].pt for m in good])
     pts_map = np.float32([kp_map[m.trainIdx].pt for m in good])
+
+    if len(good) < 10:
+        return None
+
     M, inliers = cv2.estimateAffinePartial2D(pts_frame, pts_map)
 
     h, w = frame.shape[:2]
