@@ -5,43 +5,106 @@ findHomography for nadir imagery. A downward-looking camera over flat terrain
 is a 4-DOF similarity (rotation, scale, translation); fitting 8 DOF spends the
 extra freedom on noise and can produce confident nonsense on thin inlier sets.
 """
-import cv2, numpy as np
 
-def match_frame(frame, map_img, detector=None):
-    """Find correspondences between a drone frame and the reference map.
+import cv2
+import numpy as np
 
-    Return whatever downstream needs — matched point pairs plus enough
-    diagnostics (match counts, distances) to judge quality later.
+from navmod.georef import MapGeoref, px_to_latlon
+from navmod.types import Fix
+
+_NO_FIX = Fix(lat=0.0, lon=0.0, heading_rad=0.0, sigma_m=float("inf"), ok=False)
+
+
+def _match_core(frame, map_img, detector=None):
+    """Detect, match, and fit a similarity transform (frame → map).
+
+    Returns (M, inliers, pts_frame, pts_map) or None.
     """
+    if detector is None:
+        detector = cv2.ORB.create(nfeatures=3000)
 
-    orb = cv2.ORB.create(nfeatures=3000)
-    kp_map, des_map = orb.detectAndCompute(map_img, None)
-    kp_frame, des_frame = orb.detectAndCompute(frame, None)
+    kp_map, des_map = detector.detectAndCompute(map_img, None)
+    kp_frame, des_frame = detector.detectAndCompute(frame, None)
 
-    matcher = cv2.BFMatcher()
-    matches = matcher.knnMatch(des_frame, des_map, k=2)
+    if des_frame is None or des_map is None:
+        return None
+    if len(des_frame) < 2 or len(des_map) < 2:
+        return None
 
+    matches = cv2.BFMatcher().knnMatch(des_frame, des_map, k=2)
     good = [m for m, n in matches if m.distance < 0.65 * n.distance]
-
-    pts_frame = np.float32([kp_frame[m.queryIdx].pt for m in good])
-    pts_map = np.float32([kp_map[m.trainIdx].pt for m in good])
 
     if len(good) < 10:
         return None
 
+    pts_frame = np.float32([kp_frame[m.queryIdx].pt for m in good])
+    pts_map = np.float32([kp_map[m.trainIdx].pt for m in good])
+
     M, inliers = cv2.estimateAffinePartial2D(pts_frame, pts_map)
+    if M is None or inliers is None:
+        return None
 
-    h, w = frame.shape[:2]
-    center_frame = np.array([w/2, h/2, 1])
-    center_map = M @ center_frame
-
-    return center_map
+    return M, inliers, pts_frame, pts_map
 
 
-def estimate_pose(frame, map_img, detector=None):
-    """Estimate map position (and heading/scale) of `frame`.
+def match_frame(frame, map_img, detector=None):
+    """Find the frame's centre position on the map in pixel coordinates.
 
-    Return a confidence alongside the pose, and make "no fix" representable:
-    a wrong position reported confidently is worse than no answer.
+    Returns (px_x, px_y) as a numpy array, or None on failure.
     """
-    raise NotImplementedError
+    result = _match_core(frame, map_img, detector)
+    if result is None:
+        return None
+
+    M = result[0]
+    h, w = frame.shape[:2]
+    return M @ np.array([w / 2, h / 2, 1])
+
+
+def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
+    """Estimate position, heading, and calibrated uncertainty of a frame.
+
+    Returns a Fix with lat/lon, heading, sigma_m, and ok flag.
+    Reports Fix(ok=False) when match quality is insufficient — a
+    confidently wrong position is worse than no answer.
+    """
+    result = _match_core(frame, map_img, detector)
+    if result is None:
+        return _NO_FIX
+
+    M, inliers, pts_frame, pts_map = result
+
+    # --- position: frame centre → map pixel → lat/lon ---
+    h, w = frame.shape[:2]
+    center_px = M @ np.array([w / 2, h / 2, 1])
+
+    map_h, map_w = map_img.shape[:2]
+    if not (0 <= center_px[0] < map_w and 0 <= center_px[1] < map_h):
+        return _NO_FIX
+
+    lat, lon = px_to_latlon(georef, float(center_px[0]), float(center_px[1]))
+
+    # --- heading: rotation component of the recovered similarity ---
+    # The recovered affine (frame→map) inverts the render transform,
+    # so M[1,0] = s·sin(θ), M[0,0] = s·cos(θ) where θ = heading.
+    scale = float(np.sqrt(M[0, 0] ** 2 + M[1, 0] ** 2))
+    if scale < 0.1 or scale > 10:
+        return _NO_FIX
+    heading_rad = float(np.arctan2(M[1, 0], M[0, 0]))
+
+    # --- calibrated uncertainty from reprojection residuals ---
+    inlier_mask = inliers.ravel().astype(bool)
+    n_inliers = int(inlier_mask.sum())
+    if n_inliers < 4:
+        return _NO_FIX
+
+    pts_h = np.hstack([pts_frame[inlier_mask], np.ones((n_inliers, 1))])
+    predicted = (M @ pts_h.T).T
+    residuals = predicted - pts_map[inlier_mask]
+    rms_px = float(np.sqrt(np.mean(np.sum(residuals ** 2, axis=1))))
+
+    avg_gsd = (georef.gsd_x + georef.gsd_y) / 2
+    # standard error of centre estimate ≈ rms / √n, floored at one pixel
+    sigma_m = max(rms_px * avg_gsd / np.sqrt(n_inliers), avg_gsd)
+
+    return Fix(lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True)
