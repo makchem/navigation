@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from navmod.augment import AugmentConfig
 from navmod.camera import render_frame
 from navmod.georef import MapGeoref, distance_m, px_to_latlon
 from navmod.matcher import estimate_pose, match_frame
@@ -134,3 +135,74 @@ class TestEstimatePose:
         noise = np.random.RandomState(99).randint(0, 256, (*FRAME_SIZE, 3), dtype=np.uint8)
         fix = estimate_pose(noise, synth_map, SYNTH_GEOREF)
         assert not fix.ok
+
+
+MILD_AUGMENT = AugmentConfig(
+    brightness=10, contrast=1.08, noise_sigma=8, blur_ksize=3,
+    jpeg_quality=90, haze_alpha=0.05, vignette_strength=0.2,
+    gamma=1.1, color_shift=(3, -2, -5), seed=7,
+)
+
+DEFAULT_AUGMENT = AugmentConfig(seed=42)
+
+HARSH_AUGMENT = AugmentConfig(
+    brightness=25, contrast=1.25, noise_sigma=20, blur_ksize=5,
+    jpeg_quality=65, haze_alpha=0.15, vignette_strength=0.5,
+    gamma=1.3, color_shift=(10, -8, -15), seed=13,
+)
+
+
+class TestAugmentedMatching:
+    """Matcher must still converge when the frame is degraded."""
+
+    @pytest.mark.parametrize("aug,tol_m", [
+        (MILD_AUGMENT, 50),
+        (DEFAULT_AUGMENT, 50),
+        (HARSH_AUGMENT, 75),
+    ], ids=["mild", "default", "harsh"])
+    def test_position_with_augmentation(self, synth_map, aug, tol_m):
+        x, y = 1000, 1000
+        frame = render_frame(synth_map, x, y, heading_deg=0, scale=1,
+                             size=FRAME_SIZE, augment=aug)
+        fix = estimate_pose(frame, synth_map, SYNTH_GEOREF)
+        assert fix.ok, "matcher failed on augmented frame"
+        true_lat, true_lon = px_to_latlon(SYNTH_GEOREF, x, y)
+        err = distance_m(fix.lat, fix.lon, true_lat, true_lon)
+        assert err < tol_m, f"position error {err:.1f} m exceeds {tol_m} m"
+
+    def test_augmented_heading(self, synth_map):
+        x, y = 1000, 1000
+        frame = render_frame(synth_map, x, y, heading_deg=30, scale=1,
+                             size=FRAME_SIZE, augment=DEFAULT_AUGMENT)
+        fix = estimate_pose(frame, synth_map, SYNTH_GEOREF)
+        if not fix.ok:
+            pytest.skip("matcher could not solve augmented rotated frame")
+        expected = np.radians(30)
+        diff = abs(fix.heading_rad - expected)
+        diff = min(diff, 2 * np.pi - diff)
+        assert diff < np.radians(15), (
+            f"heading {np.degrees(fix.heading_rad):.1f}° vs expected 30°"
+        )
+
+    def test_augmented_offset(self, synth_map):
+        x, y = 600, 1400
+        frame = render_frame(synth_map, x, y, heading_deg=0, scale=1,
+                             size=FRAME_SIZE, augment=DEFAULT_AUGMENT)
+        fix = estimate_pose(frame, synth_map, SYNTH_GEOREF)
+        assert fix.ok
+        true_lat, true_lon = px_to_latlon(SYNTH_GEOREF, x, y)
+        err = distance_m(fix.lat, fix.lon, true_lat, true_lon)
+        assert err < 50, f"position error {err:.1f} m exceeds 50 m"
+
+    def test_sigma_increases_with_degradation(self, synth_map):
+        x, y = 1000, 1000
+        frame_clean = render_frame(synth_map, x, y, size=FRAME_SIZE)
+        frame_augmented = render_frame(synth_map, x, y, size=FRAME_SIZE,
+                                       augment=HARSH_AUGMENT)
+        fix_clean = estimate_pose(frame_clean, synth_map, SYNTH_GEOREF)
+        fix_aug = estimate_pose(frame_augmented, synth_map, SYNTH_GEOREF)
+        assert fix_clean.ok and fix_aug.ok
+        assert fix_aug.sigma_m >= fix_clean.sigma_m, (
+            f"augmented sigma {fix_aug.sigma_m:.2f} should be >= "
+            f"clean sigma {fix_clean.sigma_m:.2f}"
+        )

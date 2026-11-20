@@ -15,13 +15,18 @@ from navmod.types import Fix
 _NO_FIX = Fix(lat=0.0, lon=0.0, heading_rad=0.0, sigma_m=float("inf"), ok=False)
 
 
+def _default_nfeatures(img):
+    """Scale ORB feature count to image area (~1 per 1500 px)."""
+    return max(3000, int(img.shape[0] * img.shape[1] / 1500))
+
+
 def _match_core(frame, map_img, detector=None):
     """Detect, match, and fit a similarity transform (frame → map).
 
     Returns (M, inliers, pts_frame, pts_map) or None.
     """
     if detector is None:
-        detector = cv2.ORB.create(nfeatures=3000)
+        detector = cv2.ORB.create(nfeatures=_default_nfeatures(map_img))
 
     kp_map, des_map = detector.detectAndCompute(map_img, None)
     kp_frame, des_frame = detector.detectAndCompute(frame, None)
@@ -31,8 +36,8 @@ def _match_core(frame, map_img, detector=None):
     if len(des_frame) < 2 or len(des_map) < 2:
         return None
 
-    matches = cv2.BFMatcher().knnMatch(des_frame, des_map, k=2)
-    good = [m for m, n in matches if m.distance < 0.65 * n.distance]
+    matches = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(des_frame, des_map, k=2)
+    good = [m for m, n in matches if m.distance < 0.75 * n.distance]
 
     if len(good) < 10:
         return None
