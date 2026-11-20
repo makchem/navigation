@@ -1,7 +1,57 @@
-from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus
-from pymavlink import mavutil
-import time
 import math
+import os
+import time
+
+import cv2
+import yaml
+from pymavlink import mavutil
+
+from navmod.camera import render_frame
+from navmod.georef import MapGeoref, latlon_to_px
+from navmod.matcher import estimate_pose
+from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus
+
+
+FRAME_SIZE = (512, 512)
+
+
+def load_pipeline(config_path="config/default.yaml"):
+    """Load map, georef, and camera config for the optical pipeline."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    with open(os.path.join(repo_root, config_path)) as f:
+        cfg = yaml.safe_load(f)
+
+    map_path = os.path.join(repo_root, cfg["map"]["path"])
+    map_rgba = cv2.imread(map_path, cv2.IMREAD_UNCHANGED)
+    if map_rgba is None:
+        raise FileNotFoundError(f"Map not found: {map_path}")
+
+    h, w = map_rgba.shape[:2]
+    georef = MapGeoref(
+        top_left_lat=cfg["map"]["top_left_lat"],
+        top_left_lon=cfg["map"]["top_left_lon"],
+        bottom_right_lat=cfg["map"]["bottom_right_lat"],
+        bottom_right_lon=cfg["map"]["bottom_right_lon"],
+        image_width_px=w,
+        image_height_px=h,
+    )
+
+    if map_rgba.shape[2] == 4:
+        map_bgr = cv2.cvtColor(map_rgba, cv2.COLOR_BGRA2BGR)
+    else:
+        map_bgr = map_rgba
+
+    fov_deg = cfg["camera"]["fov_deg"]
+    return map_rgba, map_bgr, georef, fov_deg
+
+
+def compute_scale(alt_m, fov_deg, gsd_x, frame_width):
+    """Compute render_frame scale from altitude and camera FOV."""
+    fov_rad = math.radians(fov_deg)
+    ground_width_m = 2 * alt_m * math.tan(fov_rad / 2)
+    base_width_m = frame_width * gsd_x
+    return ground_width_m / base_width_m
 
 
 
@@ -166,6 +216,10 @@ def main():
 
     request_sim_state(connection)
 
+    print("Loading map and georef...")
+    map_rgba, map_bgr, georef, fov_deg = load_pipeline()
+    print(f"Map loaded: {map_rgba.shape[1]}x{map_rgba.shape[0]}, GSD={georef.gsd_x:.2f} m/px")
+
     messages = {}
     last_received = {}
 
@@ -269,12 +323,27 @@ def main():
                     if time.monotonic() - sim_time > 2.0:
                         continue
                     
+                    px_x, px_y = latlon_to_px(georef, state.lat, state.lon)
+                    heading_deg = math.degrees(state.yaw_rad)
+                    scale = compute_scale(state.alt_m, fov_deg, georef.gsd_x, FRAME_SIZE[0])
+
+                    frame = render_frame(map_rgba, px_x, px_y, heading_deg, scale, FRAME_SIZE, augment=True)
+                    if frame.shape[2] == 4:
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                    else:
+                        frame_bgr = frame
+
+                    fix = estimate_pose(frame_bgr, map_bgr, georef)
+                    if not fix.ok:
+                        print(f"WARNING: matcher failed, skipping GPS_INPUT")
+                        continue
+
                     test_output = ModuleOutput(
-                        lat=state.lat,
-                        lon=state.lon,
+                        lat=fix.lat,
+                        lon=fix.lon,
                         alt_m=sim_state.alt,
-                        heading_rad=state.yaw_rad,
-                        sigma_m=5.0,
+                        heading_rad=fix.heading_rad,
+                        sigma_m=fix.sigma_m,
                         module_status=ModuleStatus.FIX,
                     )
 
@@ -302,7 +371,8 @@ def main():
                         "GPS_INPUT prepared:",
                         encoded["lat"],
                         encoded["lon"],
-                        "alt:", encoded["alt"]
+                        "alt:", encoded["alt"],
+                        "sigma:", f"{fix.sigma_m:.2f}m"
                     )
 
 
