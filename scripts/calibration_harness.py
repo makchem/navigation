@@ -5,6 +5,7 @@ then prints a summary table.  Used by notebooks/02_sigma_calibration.ipynb to
 derive inlier-ratio-based sigma lookup tables.
 """
 
+import argparse
 import csv
 import math
 import os
@@ -56,8 +57,12 @@ def load_pipeline(config_path="config/default.yaml"):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate calibration data for sigma lookup tables.")
+    parser.add_argument("--config", default="config/default.yaml", help="Path to config YAML")
+    args = parser.parse_args()
+
     print("Loading map...")
-    map_rgba, map_bgr, georef = load_pipeline()
+    map_rgba, map_bgr, georef = load_pipeline(args.config)
     map_h, map_w = map_rgba.shape[:2]
     print(f"Map: {map_w}x{map_h}, GSD={georef.gsd_x:.2f} m/px")
 
@@ -103,7 +108,7 @@ def main():
                 frame_bgr = frame
             frame_bgr = augment_frame(frame_bgr)
 
-            fix = estimate_pose(frame_bgr, map_bgr, georef)
+            fix = estimate_pose(frame_bgr, map_bgr, georef, sigma_lut=None)
 
             if fix.ok:
                 err = distance_m(true_lat, true_lon, fix.lat, fix.lon)
@@ -150,6 +155,8 @@ def main():
         print(f"95th %ile error: {p95:.2f} m")
     else:
         print("No successful fixes — cannot compute error stats.")
+
+    print("\nRun scripts/build_sigma_table.py to generate a lookup table from these results.")
 
 
 if __name__ == "__main__":

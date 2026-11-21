@@ -15,6 +15,17 @@ from navmod.types import Fix
 _NO_FIX = Fix(lat=0.0, lon=0.0, heading_rad=0.0, sigma_m=float("inf"), ok=False)
 
 
+def _sigma_from_lut(inlier_ratio: float, lut: list[dict]) -> tuple[float, bool]:
+    """Return (sigma_m, ok) from the lookup table."""
+    for entry in lut:
+        if inlier_ratio < entry["max_ratio"]:
+            if not entry.get("ok", True):
+                return 0.0, False
+            return entry["sigma_m"], True
+    last = lut[-1]
+    return last["sigma_m"], True
+
+
 def _default_nfeatures(img):
     """Scale ORB feature count to image area (~1 per 1500 px)."""
     return max(3000, int(img.shape[0] * img.shape[1] / 1500))
@@ -66,7 +77,8 @@ def match_frame(frame, map_img, detector=None):
     return M @ np.array([w / 2, h / 2, 1])
 
 
-def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
+def estimate_pose(frame, map_img, georef: MapGeoref, detector=None,
+                   sigma_lut: list[dict] | None = None):
     """Estimate position, heading, and calibrated uncertainty of a frame.
 
     Returns a Fix with lat/lon, heading, sigma_m, and ok flag.
@@ -113,6 +125,11 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
     sigma_m = max(rms_px * avg_gsd / np.sqrt(n_inliers), avg_gsd)
 
     inlier_ratio = n_inliers / n_total
+
+    if sigma_lut is not None:
+        sigma_m, ok = _sigma_from_lut(inlier_ratio, sigma_lut)
+        if not ok:
+            return _NO_FIX
 
     return Fix(
         lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True,
