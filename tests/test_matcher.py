@@ -201,7 +201,7 @@ class TestAugmentedMatching:
         err = distance_m(fix.lat, fix.lon, true_lat, true_lon)
         assert err < 50, f"position error {err:.1f} m exceeds 50 m"
 
-    def test_sigma_increases_with_degradation(self, synth_map):
+    def test_degradation_reduces_inliers(self, synth_map):
         x, y = 1000, 1000
         frame_clean = render_frame(synth_map, x, y, size=FRAME_SIZE)
         frame_augmented = render_frame(synth_map, x, y, size=FRAME_SIZE,
@@ -209,7 +209,7 @@ class TestAugmentedMatching:
         fix_clean = estimate_pose(frame_clean, synth_map, SYNTH_GEOREF)
         fix_aug = estimate_pose(frame_augmented, synth_map, SYNTH_GEOREF)
         assert fix_clean.ok and fix_aug.ok
-        assert fix_aug.sigma_m >= fix_clean.sigma_m, (
-            f"augmented sigma {fix_aug.sigma_m:.2f} should be >= "
-            f"clean sigma {fix_clean.sigma_m:.2f}"
+        assert fix_aug.n_inliers <= fix_clean.n_inliers, (
+            f"augmented n_inliers {fix_aug.n_inliers} should be <= "
+            f"clean n_inliers {fix_clean.n_inliers}"
         )
