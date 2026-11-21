@@ -153,9 +153,11 @@ MILD_AUGMENT = AugmentConfig(
 DEFAULT_AUGMENT = AugmentConfig(seed=42)
 
 HARSH_AUGMENT = AugmentConfig(
-    brightness=25, contrast=1.25, noise_sigma=20, blur_ksize=5,
-    jpeg_quality=65, haze_alpha=0.15, vignette_strength=0.5,
-    gamma=1.3, color_shift=(10, -8, -15), seed=13,
+    brightness=15, contrast=1.15, noise_sigma=14, blur_ksize=3,
+    jpeg_quality=72, haze_alpha=0.10, vignette_strength=0.4,
+    gamma=1.15, color_shift=(8, -6, -10),
+    shift_px=2.0, rotation_deg=1.5, scale_jitter=0.02, perspective_px=3.0,
+    motion_blur_px=3.0, seed=47,
 )
 
 

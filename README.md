@@ -99,7 +99,7 @@ param set SIM_GPS1_ENABLE 1
 
 загрузити маршрукт
 ```
-wp load .../navigation/dresden_gps_test.waypoints
+wp load /home/spitfire/codin/navigation/dresden_gps_test.waypoints
 ```
 
 почати місію

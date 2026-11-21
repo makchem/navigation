@@ -210,13 +210,15 @@ def request_sim_state(connection):
     )
 
 
+SEARCH_RADIUS_PX = 500
+
+
 def generate_camera_frame(state, map_bgr, georef, fov_deg):
     """Generate one synthetic camera frame from SITL truth."""
 
     px_x, px_y = latlon_to_px(
         georef, state.lat, state.lon
     )
-
     heading_deg = math.degrees(state.yaw_rad)
 
     scale = compute_scale(
@@ -345,6 +347,7 @@ def _run_bridge(logger):
     nav_source = None
     last_match_sent = 0.0
     home_alt_amsl = None
+    prior_px = None
 
     try:
         while True:
@@ -371,6 +374,7 @@ def _run_bridge(logger):
                     nav_source = None
                     vo_diag.mark_gap()
                     last_vo_simstate_rx = None
+                    prior_px = None
                     connection.target_system = msg.get_srcSystem()
                     connection.target_component = msg.get_srcComponent()
                     request_sim_state(connection)
@@ -404,13 +408,14 @@ def _run_bridge(logger):
                 continue
 
             gps = parse_gps(messages, last_received)
-            if gps.available and now - last_relay_sent >= relay_interval:
-                # GPS1->GPS2 bootstrap (SITL only), never counted as matcher sent_to_ekf.
-                try:
-                    relay_gps1_to_gps2(connection, gps, messages["GPS_RAW_INT"])
-                    last_relay_sent = now
-                except Exception as exc:
-                    print(f"GPS2 relay send failed: {exc}")
+            if gps.available:
+                prior_px = latlon_to_px(georef, gps.lat, gps.lon)
+                if now - last_relay_sent >= relay_interval:
+                    try:
+                        relay_gps1_to_gps2(connection, gps, messages["GPS_RAW_INT"])
+                        last_relay_sent = now
+                    except Exception as exc:
+                        print(f"GPS2 relay send failed: {exc}")
 
             t_sim = _boot_seconds(messages, last_received, now)
             if t_sim is None:
@@ -450,9 +455,6 @@ def _run_bridge(logger):
                         frame_id=frame_id,
                     )
 
-                    # Read-only VO: use each new SIMSTATE packet once.
-                    # Passing repeated truth frames with independent noise creates
-                    # fake optical flow even when the aircraft does not move.
                     if state.alt_m > 5.0:
                         simstate_rx = last_received.get("SIMSTATE")
                         if (simstate_rx is not None
@@ -466,8 +468,6 @@ def _run_bridge(logger):
                                 vo_diag.mark_gap()
                             else:
                                 try:
-                                    # The estimator sees a frame + AHRS yaw.
-                                    # True lat/lon is used ONLY by the CSV scorer.
                                     vo_diag.observe(
                                         camera_frame,
                                         yaw_rad=attitude.yaw,
@@ -489,13 +489,14 @@ def _run_bridge(logger):
                         camera_frame.image,
                         map_bgr,
                         georef,
+                        prior_px=prior_px,
+                        search_radius_px=SEARCH_RADIUS_PX if prior_px is not None else None,
                     )
-
-                    # Майбутня Visual Odometry:
-                    # vo_result = odometry.update(camera_frame)
 
                 except Exception as exc:
                     print(f"Visual pipeline error: {exc}")
+                if fix.ok:
+                    prior_px = latlon_to_px(georef, fix.lat, fix.lon)
 
             if gps.available:
                 if nav_source != "GPS":
