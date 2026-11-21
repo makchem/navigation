@@ -13,7 +13,16 @@ from pymavlink import mavutil
 from navmod.camera import render_frame
 from navmod.georef import MapGeoref, latlon_to_px
 from navmod.matcher import estimate_pose
+from navmod.odometry import camera_gsd
 from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus, Fix
+from navmod.types import (
+    State,
+    GpsMeasurement,
+    ModuleOutput,
+    ModuleStatus,
+    Fix,
+    CameraFrame,
+)
 
 # src/logger.py is a standalone module, not a submodule of navmod.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -55,12 +64,23 @@ def load_pipeline(config_path="config/default.yaml"):
     return map_rgba, map_bgr, georef, fov_deg
 
 
-def compute_scale(alt_m, fov_deg, gsd_x, frame_width):
-    """Compute render_frame scale from altitude and camera FOV."""
-    fov_rad = math.radians(fov_deg)
-    ground_width_m = 2 * alt_m * math.tan(fov_rad / 2)
-    base_width_m = frame_width * gsd_x
-    return ground_width_m / base_width_m
+
+def compute_scale(
+    alt_m,
+    fov_deg,
+    gsd_x,
+    frame_width,
+    frame_height,
+):
+    gsd = camera_gsd(
+        alt_m,
+        fov_deg,
+        frame_width,
+        frame_height,
+    )
+
+    return gsd / gsd_x
+
 
 
 def parse_state(messages, last_received) -> State | None:
@@ -189,19 +209,37 @@ def request_sim_state(connection):
     )
 
 
-def estimate_visual_fix(state, map_rgba, map_bgr, georef, fov_deg):
-    """Generate a synthetic camera frame and match it against the map."""
-    px_x, px_y = latlon_to_px(georef, state.lat, state.lon)
+def generate_camera_frame(state, map_bgr, georef, fov_deg):
+    """Generate one synthetic camera frame from SITL truth."""
+
+    px_x, px_y = latlon_to_px(
+        georef, state.lat, state.lon
+    )
+
     heading_deg = math.degrees(state.yaw_rad)
-    scale = compute_scale(state.alt_m, fov_deg, georef.gsd_x, FRAME_SIZE[0])
+
+    scale = compute_scale(
+        state.alt_m,
+        fov_deg,
+        georef.gsd_x,
+        FRAME_SIZE[0],
+        FRAME_SIZE[1],
+    )
 
     frame = render_frame(
-        map_bgr, px_x, px_y, heading_deg, scale, FRAME_SIZE, augment=True
+        map_bgr,
+        px_x,
+        px_y,
+        heading_deg,
+        scale,
+        FRAME_SIZE,
+        augment=True,
     )
-    if frame.shape[2] == 4:
+
+    if frame.ndim == 3 and frame.shape[2] == 4:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-    return estimate_pose(frame, map_bgr, georef)
+    return frame
 
 
 def _fresh(messages, received, name, now, max_age=1.0):
@@ -387,9 +425,28 @@ def _run_bridge(logger):
             # including while GPS1 is ON. This does NOT change GPS1 priority.
             if state is not None:
                 try:
-                    fix = estimate_visual_fix(state, map_rgba, map_bgr, georef, fov_deg)
+                    image = generate_camera_frame(
+                        state, map_bgr, georef, fov_deg
+                    )
+
+                    camera_frame = CameraFrame(
+                        image=image,
+                        timestamp_s=state.timestamp_s,
+                        height_agl_m=state.alt_m,
+                        frame_id=frame_id,
+                    )
+
+                    fix = estimate_pose(
+                        camera_frame.image,
+                        map_bgr,
+                        georef,
+                    )
+
+                    # Майбутня Visual Odometry:
+                    # vo_result = odometry.update(camera_frame)
+
                 except Exception as exc:
-                    print(f"Matcher error at t_sim={t_sim:.3f}: {exc}")
+                    print(f"Visual pipeline error: {exc}")
 
             if gps.available:
                 if nav_source != "GPS":

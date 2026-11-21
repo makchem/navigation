@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import numpy as np
 
 class GpsStatus(Enum):
     OK = "ok"
@@ -64,3 +65,11 @@ class ModuleOutput:
     gps_status: GpsStatus = GpsStatus.OK
     module_status: ModuleStatus = ModuleStatus.FIX
     timestamp_s: float = 0.0
+
+@dataclass
+class CameraFrame:
+    """Camera image with metadata for visual odometry."""
+    image: np.ndarray
+    timestamp_s: float
+    height_agl_m: float
+    frame_id: int
