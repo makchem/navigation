@@ -15,6 +15,7 @@ from navmod.georef import MapGeoref, latlon_to_px
 from navmod.matcher import estimate_pose
 from navmod.odometry import camera_gsd
 from navmod.vo_diagnostics import VODiagnosticRunner
+from navmod.vo_gps2 import VOGps2Adapter
 from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus, Fix
 from navmod.types import (
     State,
@@ -32,6 +33,9 @@ from logger import RunLogger
 
 FRAME_SIZE = (512, 512)
 GPS_INPUT_GPS_ID = 1  # GPS2: GPS1 залишаємо для штатного GPS SITL.
+GPS2_SOURCE = os.getenv("NAVMOD_GPS2_SOURCE", "matcher").lower()
+if GPS2_SOURCE not in {"matcher", "vo"}:
+    raise ValueError("NAVMOD_GPS2_SOURCE must be matcher or vo")
 
 
 def load_pipeline(config_path="config/default.yaml"):
@@ -331,6 +335,8 @@ def _run_bridge(logger):
         fov_diag_deg=fov_deg,
     )
     print(f"VO diagnostic log: {vo_diag.path}")
+    vo_gps = VOGps2Adapter(georef)
+    print(f"GPS2 optical source: {GPS2_SOURCE.upper()} (SITL test)")
     last_vo_simstate_rx = None
 
     messages = {}
@@ -344,6 +350,7 @@ def _run_bridge(logger):
     frame_id = 0
     nav_source = None
     last_match_sent = 0.0
+    last_vo_report = 0.0
     home_alt_amsl = None
 
     try:
@@ -370,6 +377,7 @@ def _run_bridge(logger):
                     home_alt_amsl = None
                     nav_source = None
                     vo_diag.mark_gap()
+                    vo_gps.reset()
                     last_vo_simstate_rx = None
                     connection.target_system = msg.get_srcSystem()
                     connection.target_component = msg.get_srcComponent()
@@ -382,6 +390,7 @@ def _run_bridge(logger):
                     print("WARNING: SITL connection lost")
                     messages.clear()
                     vo_diag.mark_gap()
+                    vo_gps.reset()
                     last_vo_simstate_rx = None
                 link_alive = False
                 continue
@@ -434,6 +443,8 @@ def _run_bridge(logger):
                 heading_rad=float("nan"), sigma_m=float("inf"), ok=False,
             )
             sent_to_ekf = False
+            optical_tx_source = ""
+            vo_row = None
 
             # Diagnostic matching always runs when the camera state is valid,
             # including while GPS1 is ON. This does NOT change GPS1 priority.
@@ -468,9 +479,9 @@ def _run_bridge(logger):
                                 try:
                                     # The estimator sees a frame + AHRS yaw.
                                     # True lat/lon is used ONLY by the CSV scorer.
-                                    vo_diag.observe(
+                                    vo_row = vo_diag.observe(
                                         camera_frame,
-                                        yaw_rad=attitude.yaw,
+                                        yaw_rad=gt["yaw_rad"],
                                         gt_lat=gt["lat"],
                                         gt_lon=gt["lon"],
                                         gt_yaw_rad=gt["yaw_rad"],
@@ -497,10 +508,42 @@ def _run_bridge(logger):
                 except Exception as exc:
                     print(f"Visual pipeline error: {exc}")
 
+            vo_fix = (vo_gps.update(vo_row=vo_row, gps=gps, matcher_fix=fix)
+                      if GPS2_SOURCE == "vo" else None)
+
             if gps.available:
                 if nav_source != "GPS":
                     nav_source = "GPS"
                     print("NAV SOURCE -> GPS (GPS2 relay active)")
+            elif GPS2_SOURCE == "vo":
+                # SITL-only GPS2 experiment. No truth lat/lon enters VO.
+                altitude = _fresh(messages, last_received, "SIM_STATE", now)
+                if vo_fix is not None and altitude is not None:
+                    output = ModuleOutput(
+                        lat=vo_fix.lat, lon=vo_fix.lon, alt_m=altitude.alt,
+                        heading_rad=0.0, sigma_m=vo_fix.reported_accuracy_m,
+                        module_status=ModuleStatus.FIX,
+                    )
+                    payload = encode_output(output)
+                    payload["yaw"] = 0  # Unknown: VO does not estimate absolute yaw.
+                    try:
+                        connection.mav.gps_input_send(**payload)
+                    except Exception as exc:
+                        print(f"VO GPS_INPUT send failed: {exc}")
+                    else:
+                        sent_to_ekf = True
+                        optical_tx_source = "vo"
+                        if nav_source != "VO":
+                            nav_source = "VO"
+                            print(f"NAV SOURCE -> VO (anchor={vo_fix.anchor_source})")
+                        if now - last_vo_report > 2.0:
+                            print(f"VO GPS2 sent: sigma={vo_fix.vo_sigma_m:.1f}m "
+                                  f"reported_accuracy={vo_fix.reported_accuracy_m:.1f}m "
+                                  f"segment={vo_fix.segment_id}")
+                            last_vo_report = now
+                elif nav_source != "VO_NO_FIX":
+                    nav_source = "VO_NO_FIX"
+                    print("NAV SOURCE -> VO_NO_FIX (waiting for anchor/track)")
             elif fix.ok and state is not None:
                 altitude = _fresh(messages, last_received, "SIM_STATE", now)
                 if altitude is not None:
@@ -515,6 +558,7 @@ def _run_bridge(logger):
                         print(f"Matcher GPS_INPUT send failed: {exc}")
                     else:
                         sent_to_ekf = True
+                        optical_tx_source = "matcher"
                         if nav_source != "MATCHER":
                             nav_source = "MATCHER"
                             print("NAV SOURCE -> MATCHER")
@@ -532,6 +576,7 @@ def _run_bridge(logger):
                 t_sim=t_sim, frame_id=frame_id, gt=gt, fix=fix,
                 branch_won="",  # No texture/structure/fused branches in main.
                 sent_to_ekf=sent_to_ekf, gps_state=gps_state,
+                optical_tx_source=optical_tx_source,
             )
             frame_id += 1
     finally:

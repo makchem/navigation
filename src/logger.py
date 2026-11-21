@@ -18,7 +18,7 @@ class RunLogger:
         "t_sim", "frame_id", "gt_lat", "gt_lon", "gt_heading", "gt_alt",
         "fix_lat", "fix_lon", "fix_heading", "sigma_m", "ok",
         "n_inliers", "n_total", "inlier_ratio", "branch_won",
-        "sent_to_ekf", "gps_state",
+        "sent_to_ekf", "gps_state", "optical_tx_source",
     )
     BRANCH_FIELDS = (
         "t_sim", "frame_id", "branch", "n_keypoints", "n_matches",
@@ -81,7 +81,7 @@ class RunLogger:
     def log_tick(
         self, *, t_sim: float, frame_id: int, gt: Any, fix: Any,
         branch_won: str = "", sent_to_ekf: bool = False,
-        gps_state: str = "off",
+        gps_state: str = "off", optical_tx_source: str = "",
     ) -> None:
         if self._closed:
             raise RuntimeError("RunLogger is closed")
@@ -112,6 +112,7 @@ class RunLogger:
             "inlier_ratio": self._value(fix, "inlier_ratio", default=0.0),
             "branch_won": branch_won,
             "sent_to_ekf": bool(sent_to_ekf),
+            "optical_tx_source": optical_tx_source,
             "gps_state": gps_state,
         }
         self._writer.writerow(row)
