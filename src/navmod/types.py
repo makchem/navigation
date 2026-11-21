@@ -39,6 +39,8 @@ class Fix:
     heading_rad: float
     sigma_m: float      # horizontal uncertainty in metres
     ok: bool            # False = no fix (matcher failed / low confidence)
+    n_inliers: int = 0
+    inlier_ratio: float = 0.0
 
 
 @dataclass

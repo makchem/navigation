@@ -29,6 +29,17 @@ sitl:
   custom_location: "51.0688,13.7198,200,0"  # map centre, 200m AGL, heading north
   loop_hz: 5
 
+sigma_lut:
+  thresholds:
+    - max_ratio: 0.25
+      ok: false
+    - max_ratio: 0.35
+      sigma_m: 1.00
+    - max_ratio: 0.50
+      sigma_m: 0.50
+    - max_ratio: 1.00
+      sigma_m: 0.20
+
 scenarios:
   gps_normal:
     noise_sigma_m: 2.0

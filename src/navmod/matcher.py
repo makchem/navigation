@@ -15,6 +15,17 @@ from navmod.types import Fix
 _NO_FIX = Fix(lat=0.0, lon=0.0, heading_rad=0.0, sigma_m=float("inf"), ok=False)
 
 
+def _sigma_from_lut(inlier_ratio: float, lut: list[dict]) -> tuple[float, bool]:
+    """Return (sigma_m, ok) from the lookup table."""
+    for entry in lut:
+        if inlier_ratio < entry["max_ratio"]:
+            if not entry.get("ok", True):
+                return 0.0, False
+            return entry["sigma_m"], True
+    last = lut[-1]
+    return last["sigma_m"], True
+
+
 def _default_nfeatures(img):
     """Scale ORB feature count to image area (~1 per 1500 px)."""
     return max(3000, int(img.shape[0] * img.shape[1] / 1500))
@@ -49,7 +60,7 @@ def _match_core(frame, map_img, detector=None):
     if M is None or inliers is None:
         return None
 
-    return M, inliers, pts_frame, pts_map
+    return M, inliers, pts_frame, pts_map, len(good)
 
 
 def match_frame(frame, map_img, detector=None):
@@ -61,12 +72,13 @@ def match_frame(frame, map_img, detector=None):
     if result is None:
         return None
 
-    M = result[0]
+    M = result[0]  # (M, inliers, pts_frame, pts_map, n_total)
     h, w = frame.shape[:2]
     return M @ np.array([w / 2, h / 2, 1])
 
 
-def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
+def estimate_pose(frame, map_img, georef: MapGeoref, detector=None,
+                   sigma_lut: list[dict] | None = None):
     """Estimate position, heading, and calibrated uncertainty of a frame.
 
     Returns a Fix with lat/lon, heading, sigma_m, and ok flag.
@@ -77,7 +89,7 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
     if result is None:
         return _NO_FIX
 
-    M, inliers, pts_frame, pts_map = result
+    M, inliers, pts_frame, pts_map, n_total = result
 
     # --- position: frame centre → map pixel → lat/lon ---
     h, w = frame.shape[:2]
@@ -112,4 +124,19 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
     # standard error of centre estimate ≈ rms / √n, floored at one pixel
     sigma_m = max(rms_px * avg_gsd / np.sqrt(n_inliers), avg_gsd)
 
-    return Fix(lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True)
+    inlier_ratio = n_inliers / n_total
+
+    if sigma_lut is not None:
+        sigma_m, ok = _sigma_from_lut(inlier_ratio, sigma_lut)
+        if not ok:
+            return _NO_FIX
+    else:
+        if inlier_ratio < 0.25:
+            return _NO_FIX
+        sigma_m = float(np.interp(inlier_ratio, [0.25, 0.35, 0.50, 1.00],
+                                                 [1.00, 0.50, 0.20, 0.20]))
+
+    return Fix(
+        lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True,
+        n_inliers=n_inliers, inlier_ratio=inlier_ratio,
+    )

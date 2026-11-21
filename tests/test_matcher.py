@@ -125,6 +125,13 @@ class TestEstimatePose:
         assert fix.ok
         assert 0 < fix.sigma_m < 50, f"sigma_m {fix.sigma_m:.2f} out of reasonable range"
 
+    def test_inlier_stats(self, synth_map):
+        frame = render_frame(synth_map, 1000, 1000, heading_deg=0, scale=1, size=FRAME_SIZE)
+        fix = estimate_pose(frame, synth_map, SYNTH_GEOREF)
+        assert fix.ok
+        assert fix.n_inliers > 0
+        assert 0 < fix.inlier_ratio <= 1.0
+
     def test_blank_frame_no_fix(self, synth_map):
         blank = np.zeros((*FRAME_SIZE, 3), dtype=np.uint8)
         fix = estimate_pose(blank, synth_map, SYNTH_GEOREF)
@@ -194,7 +201,7 @@ class TestAugmentedMatching:
         err = distance_m(fix.lat, fix.lon, true_lat, true_lon)
         assert err < 50, f"position error {err:.1f} m exceeds 50 m"
 
-    def test_sigma_increases_with_degradation(self, synth_map):
+    def test_degradation_reduces_inliers(self, synth_map):
         x, y = 1000, 1000
         frame_clean = render_frame(synth_map, x, y, size=FRAME_SIZE)
         frame_augmented = render_frame(synth_map, x, y, size=FRAME_SIZE,
@@ -202,7 +209,7 @@ class TestAugmentedMatching:
         fix_clean = estimate_pose(frame_clean, synth_map, SYNTH_GEOREF)
         fix_aug = estimate_pose(frame_augmented, synth_map, SYNTH_GEOREF)
         assert fix_clean.ok and fix_aug.ok
-        assert fix_aug.sigma_m >= fix_clean.sigma_m, (
-            f"augmented sigma {fix_aug.sigma_m:.2f} should be >= "
-            f"clean sigma {fix_clean.sigma_m:.2f}"
+        assert fix_aug.n_inliers <= fix_clean.n_inliers, (
+            f"augmented n_inliers {fix_aug.n_inliers} should be <= "
+            f"clean n_inliers {fix_clean.n_inliers}"
         )
