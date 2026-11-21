@@ -128,8 +128,11 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None,
 
     if sigma_lut is not None:
         sigma_m, ok = _sigma_from_lut(inlier_ratio, sigma_lut)
-        if not ok:
+    else:
+        if inlier_ratio < 0.25:
             return _NO_FIX
+        sigma_m = float(np.interp(inlier_ratio, [0.25, 0.35, 0.50, 1.00],
+                                                 [1.00, 0.50, 0.20, 0.20]))
 
     return Fix(
         lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True,
