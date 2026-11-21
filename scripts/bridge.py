@@ -14,6 +14,7 @@ from navmod.camera import render_frame
 from navmod.georef import MapGeoref, latlon_to_px
 from navmod.matcher import estimate_pose
 from navmod.odometry import camera_gsd
+from navmod.vo_diagnostics import VODiagnosticRunner
 from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus, Fix
 from navmod.types import (
     State,
@@ -323,6 +324,15 @@ def _run_bridge(logger):
     map_rgba, map_bgr, georef, fov_deg = load_pipeline()
     print(f"Map loaded: {map_bgr.shape[1]}x{map_bgr.shape[0]}, GSD={georef.gsd_x:.2f} m/px")
 
+    # Diagnostic sidecar: no data from VO goes to the autopilot.
+    vo_diag = VODiagnosticRunner(
+        logger.path.with_name(logger.path.stem + "_vo.csv"),
+        georef=georef,
+        fov_diag_deg=fov_deg,
+    )
+    print(f"VO diagnostic log: {vo_diag.path}")
+    last_vo_simstate_rx = None
+
     messages = {}
     last_received = {"HEARTBEAT": time.monotonic()}
     link_alive = True
@@ -359,6 +369,8 @@ def _run_bridge(logger):
                     next_tick_t = None
                     home_alt_amsl = None
                     nav_source = None
+                    vo_diag.mark_gap()
+                    last_vo_simstate_rx = None
                     connection.target_system = msg.get_srcSystem()
                     connection.target_component = msg.get_srcComponent()
                     request_sim_state(connection)
@@ -369,6 +381,8 @@ def _run_bridge(logger):
                 if link_alive:
                     print("WARNING: SITL connection lost")
                     messages.clear()
+                    vo_diag.mark_gap()
+                    last_vo_simstate_rx = None
                 link_alive = False
                 continue
 
@@ -436,6 +450,40 @@ def _run_bridge(logger):
                         frame_id=frame_id,
                     )
 
+                    # Read-only VO: use each new SIMSTATE packet once.
+                    # Passing repeated truth frames with independent noise creates
+                    # fake optical flow even when the aircraft does not move.
+                    if state.alt_m > 5.0:
+                        simstate_rx = last_received.get("SIMSTATE")
+                        if (simstate_rx is not None
+                                and simstate_rx != last_vo_simstate_rx):
+                            last_vo_simstate_rx = simstate_rx
+                            attitude = _fresh(
+                                messages, last_received, "ATTITUDE", now,
+                                max_age=0.3,
+                            )
+                            if attitude is None:
+                                vo_diag.mark_gap()
+                            else:
+                                try:
+                                    # The estimator sees a frame + AHRS yaw.
+                                    # True lat/lon is used ONLY by the CSV scorer.
+                                    vo_diag.observe(
+                                        camera_frame,
+                                        yaw_rad=attitude.yaw,
+                                        gt_lat=gt["lat"],
+                                        gt_lon=gt["lon"],
+                                        simstate_age_ms=(
+                                            now - simstate_rx
+                                        ) * 1000.0,
+                                        attitude_age_ms=(
+                                            now - last_received["ATTITUDE"]
+                                        ) * 1000.0,
+                                    )
+                                except Exception as vo_exc:
+                                    print(f"VO diagnostic error: {vo_exc}")
+                                    vo_diag.mark_gap()
+
                     fix = estimate_pose(
                         camera_frame.image,
                         map_bgr,
@@ -486,6 +534,7 @@ def _run_bridge(logger):
             )
             frame_id += 1
     finally:
+        vo_diag.close()
         # The with-block in main() closes and flushes CSV, even on Ctrl+C.
         connection.close()
 
