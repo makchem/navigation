@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -30,6 +30,14 @@ class FlowResult:
     # Швидкість у м/с
     ve_mps: float = float("nan")
     vn_mps: float = float("nan")
+
+    # Relative position from the current VO origin (ENU)
+    position_east_m: float = float("nan")
+    position_north_m: float = float("nan")
+
+    # Provisional, NOT calibrated uncertainties
+    sigma_delta_m: float = float("inf")
+    sigma_m: float = float("inf")
 
 
 
@@ -94,11 +102,27 @@ def pixel_shift_to_enu(
 class VisualOdometry:
     def __init__(self, fov_diag_deg: float = 60.0):
         self.fov_diag_deg = fov_diag_deg
+        self.reset()
+
+    def reset(
+        self,
+        position_east_m: float = 0.0,
+        position_north_m: float = 0.0,
+        sigma_m: float = 0.0,
+    ) -> None:
+        """Start a fresh track anchored at a known local ENU position."""
+        values = (position_east_m, position_north_m, sigma_m)
+        if not all(math.isfinite(v) for v in values) or sigma_m < 0:
+            raise ValueError("Reset position and sigma must be finite; sigma >= 0")
         self.prev_gray = None
         self.prev_t = None
         self.prev_height_m = None
+        self.position_east_m = float(position_east_m)
+        self.position_north_m = float(position_north_m)
+        self.sigma_m = float(sigma_m)
+        self._tracking_valid = True
 
-    def update(self, frame: CameraFrame, yaw_rad: float = 0.0) -> FlowResult:
+    def _estimate_flow(self, frame: CameraFrame, yaw_rad: float = 0.0) -> FlowResult:
         image = frame.image
 
         # Переводимо кадр у grayscale
@@ -247,3 +271,49 @@ class VisualOdometry:
             vn_mps=vn,
         )
 
+
+    def update(self, frame: CameraFrame, yaw_rad: float = 0.0) -> FlowResult:
+        """Estimate frame-to-frame motion and integrate only uninterrupted valid steps."""
+        had_previous = self.prev_gray is not None
+        prev_height = self.prev_height_m
+        flow = self._estimate_flow(frame, yaw_rad)
+
+        # First image is the local origin, not a measured displacement.
+        if not had_previous:
+            return replace(
+                flow,
+                position_east_m=self.position_east_m,
+                position_north_m=self.position_north_m,
+                sigma_m=self.sigma_m,
+            )
+
+        # A missing/bad step breaks the chain. Do not silently bridge the gap.
+        if not flow.ok:
+            self._tracking_valid = False
+            return replace(flow, sigma_m=float("inf"))
+        if not self._tracking_valid:
+            # We may have a good *relative* shift but no valid accumulated pose.
+            return replace(flow, ok=False, sigma_m=float("inf"))
+
+        height_m = (prev_height + frame.height_agl_m) / 2.0
+        height_px, width_px = frame.image.shape[:2]
+        gsd = camera_gsd(height_m, self.fov_diag_deg, width_px, height_px)
+        step_m = math.hypot(flow.delta_east_m, flow.delta_north_m)
+
+        # EXPERIMENTAL error-growth model; constants require SITL calibration.
+        sigma_delta_m = math.sqrt(
+            0.20**2
+            + (2.0 * flow.rms_px * gsd)**2
+            + (0.05 * step_m)**2
+        )
+        self.position_east_m += flow.delta_east_m
+        self.position_north_m += flow.delta_north_m
+        self.sigma_m = math.hypot(self.sigma_m, sigma_delta_m)
+
+        return replace(
+            flow,
+            position_east_m=self.position_east_m,
+            position_north_m=self.position_north_m,
+            sigma_delta_m=sigma_delta_m,
+            sigma_m=self.sigma_m,
+        )
