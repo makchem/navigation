@@ -145,6 +145,44 @@ def encode_output(output: ModuleOutput) -> dict:
     }
 
 
+def relay_gps1_to_gps2(connection, gps, gps_raw):
+    """Copy GPS1 position into GPS2 while GPS1 is available.
+
+    SITL-only bootstrap: GPS2 must have a valid fix before arming.
+    This is NOT an independent GPS measurement.
+    """
+
+    # GPS_RAW_INT.h_acc is measured in millimetres.
+    # If accuracy is unavailable (0), use a test-only fallback.
+    horizontal_accuracy = (
+        gps_raw.h_acc / 1000.0
+        if gps_raw.h_acc > 0
+        else 5.0
+    )
+
+    output = ModuleOutput(
+        lat=gps.lat,
+        lon=gps.lon,
+        alt_m=gps.alt_m,
+        heading_rad=0.0,
+        sigma_m=horizontal_accuracy,
+        module_status=ModuleStatus.FIX,
+    )
+
+    encoded = encode_output(output)
+
+    # GPS1 does not provide a reliable yaw while stationary.
+    # GPS_INPUT yaw=0 means "yaw unavailable".
+    encoded["yaw"] = 0
+
+    # These values come from the original GPS1 measurement.
+    encoded["fix_type"] = 3
+    encoded["satellites_visible"] = gps_raw.satellites_visible
+
+    connection.mav.gps_input_send(**encoded)
+
+
+
 def request_sim_state(connection):
     """Request SIM_STATE (message 108) at 2 Hz."""
     connection.mav.command_long_send(
@@ -215,6 +253,8 @@ def main():
     last_match_attempt = 0.0
     last_sent = 0.0
     match_interval = 0.2  # Максимум 5 спроб matching за секунду.
+    last_relay_sent = 0.0
+    relay_interval = 0.1  # GPS1 -> GPS2, максимум 10 Hz
 
     # ============================================================
     # 3. MAIN LOOP — повідомлення MAVLink і вибір джерела позиції
@@ -230,7 +270,7 @@ def main():
                 "GPS_RAW_INT",
             ],
             blocking=True,
-            timeout=1,
+            timeout=0.05,
         )
         now = time.monotonic()
 
@@ -243,6 +283,7 @@ def main():
             and msg.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA
         ):
             if not link_alive:
+                last_relay_sent = 0.0
                 print("SITL connection restored!")
                 connection.target_system = msg.get_srcSystem()
                 connection.target_component = msg.get_srcComponent()
@@ -262,6 +303,25 @@ def main():
                 messages.clear()
                 nav_source = None
             link_alive = False
+
+        # ============================================================
+        # GPS2 RELAY — незалежна періодична передача GPS_INPUT
+        # ============================================================
+
+        if link_alive and now - last_relay_sent >= relay_interval:
+
+            gps = parse_gps(messages, last_received)
+
+            if gps.available:
+                gps_raw = messages["GPS_RAW_INT"]
+
+                relay_gps1_to_gps2(
+                    connection,
+                    gps,
+                    gps_raw,
+                )
+
+                last_relay_sent = now
 
         if not link_alive or msg is None:
             continue
@@ -294,14 +354,34 @@ def main():
         # --------------------------------------------------------
         # 3.3. Найвищий пріоритет: штатний GPS1
         # --------------------------------------------------------
+
+        # GPS1 has the highest navigation priority.
         gps = parse_gps(messages, last_received)
+
         if gps.available:
-            # GPS1 уже надходить у ArduPilot напряму.
-            # Не надсилаємо GPS_INPUT, поки він доступний.
+
+            # Keep GPS2 initialized and healthy before and during flight.
+            # GPS2 receives GPS1 coordinates while the original GPS works.
+            if now - last_relay_sent >= relay_interval:
+                gps_raw = messages["GPS_RAW_INT"]
+
+                relay_gps1_to_gps2(
+                    connection,
+                    gps,
+                    gps_raw,
+                )
+
+                last_relay_sent = now
+
             if nav_source != "GPS":
-                print("NAV SOURCE -> GPS")
+                print("NAV SOURCE -> GPS (GPS2 relay active)")
                 nav_source = "GPS"
+
             continue
+
+        # GPS1 unavailable:
+        # Continue into the existing visual matching pipeline below.
+
 
         # --------------------------------------------------------
         # 3.4. GPS немає: пробуємо visual matching
