@@ -13,6 +13,7 @@ from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus
 
 
 FRAME_SIZE = (512, 512)
+GPS_INPUT_GPS_ID = 1  # GPS2: GPS1 залишаємо для штатного GPS SITL.
 
 
 def load_pipeline(config_path="config/default.yaml"):
@@ -54,33 +55,23 @@ def compute_scale(alt_m, fov_deg, gsd_x, frame_width):
     return ground_width_m / base_width_m
 
 
-
-
 def parse_state(messages, last_received) -> State | None:
-    """Convert fresh MAVLink telemetry into aircraft State."""
+    """Convert fresh SITL truth and altitude into the aircraft State.
 
-    required = ["SIMSTATE", "GLOBAL_POSITION_INT"]
+    SIMSTATE contains true lat/lon/attitude. GLOBAL_POSITION_INT is used
+    only for relative altitude and timestamp (its lat/lon may be zero).
+    """
+    required = ("SIMSTATE", "GLOBAL_POSITION_INT")
     now = time.monotonic()
 
     for msg_type in required:
-        if msg_type not in messages:
+        if msg_type not in messages or msg_type not in last_received:
             return None
-
-        if msg_type not in last_received:
-            return None
-
-        age = now - last_received[msg_type]
-
-        if age > 2.0:
+        if now - last_received[msg_type] > 2.0:
             return None
 
     sim = messages["SIMSTATE"]
     pos = messages["GLOBAL_POSITION_INT"]
-
-    print(
-    "GLOBAL ALT MSL:", pos.alt / 1000.0,
-    "RELATIVE ALT:", pos.relative_alt / 1000.0,
-)
 
     return State(
         lat=sim.lat / 1e7,
@@ -89,24 +80,19 @@ def parse_state(messages, last_received) -> State | None:
         roll_rad=sim.roll,
         pitch_rad=sim.pitch,
         yaw_rad=sim.yaw,
-        timestamp_s=pos.time_boot_ms / 1000.0
+        timestamp_s=pos.time_boot_ms / 1000.0,
     )
 
 
-
-
 def parse_gps(messages, last_received) -> GpsMeasurement:
-    """Convert fresh MAVLink GPS telemetry into GPS measurement."""
-
+    """Check ONLY GPS1's GPS_RAW_INT for a fresh 3D fix."""
     gps = messages.get("GPS_RAW_INT")
     gps_time = last_received.get("GPS_RAW_INT")
 
     if gps is None or gps_time is None:
         return GpsMeasurement(available=False)
 
-    age = time.monotonic() - gps_time
-
-    if age > 2.0:
+    if time.monotonic() - gps_time > 2.0:
         return GpsMeasurement(available=False)
 
     if gps.fix_type < 3:
@@ -117,40 +103,24 @@ def parse_gps(messages, last_received) -> GpsMeasurement:
         lon=gps.lon / 1e7,
         alt_m=gps.alt / 1000.0,
         speed_mps=gps.vel / 100.0 if gps.vel != 65535 else 0.0,
-        available=True
+        available=True,
     )
 
 
-
-
-
 def encode_output(output: ModuleOutput) -> dict:
-    """Prepare position fields for MAVLink GPS_INPUT."""
-
+    """Encode an optical position fix as GPS_INPUT for the second GPS."""
     if output.module_status != ModuleStatus.FIX:
-        raise ValueError(
-            "Cannot encode GPS_INPUT: no reliable position fix"
-        )
+        raise ValueError("Cannot encode GPS_INPUT: no reliable position fix")
 
     heading_deg = math.degrees(output.heading_rad) % 360
-
     yaw = round(heading_deg * 100)
-
-    # MAVLink uses 36000 to represent true north.
     if yaw == 0 or yaw == 36000:
-        yaw = 36000
+        yaw = 36000  # MAVLink uses 36000 for true north.
 
-    
     time_usec = time.time_ns() // 1000
-
-    # Unix timestamp of GPS epoch: 1980-01-06
     gps_epoch_usec = 315964800 * 1_000_000
-
-    # GPS time is currently 18 seconds ahead of UTC
     gps_elapsed_ms = (time_usec - gps_epoch_usec) // 1000 + 18_000
-
     gps_week, time_week_ms = divmod(gps_elapsed_ms, 604_800_000)
-
 
     return {
         "lat": round(output.lat * 1e7),
@@ -158,53 +128,55 @@ def encode_output(output: ModuleOutput) -> dict:
         "yaw": yaw,
         "horiz_accuracy": output.sigma_m,
         "alt": output.alt_m,
-        "gps_id": 0,
+        "gps_id": GPS_INPUT_GPS_ID,
         "fix_type": 3,
         "ignore_flags": 190,
         "time_usec": time_usec,
         "time_week": gps_week,
         "time_week_ms": time_week_ms,
-
         "hdop": 0.0,
         "vdop": 0.0,
-
         "vn": 0.0,
         "ve": 0.0,
         "vd": 0.0,
-
         "speed_accuracy": 0.0,
         "vert_accuracy": 0.0,
-
         "satellites_visible": 0,
     }
 
 
-
 def request_sim_state(connection):
-    """Request SIM_STATE telemetry at 2 Hz."""
-
+    """Request SIM_STATE (message 108) at 2 Hz."""
     connection.mav.command_long_send(
         connection.target_system,
         connection.target_component,
         mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
         0,
-        108,       # SIM_STATE message ID
-        500_000,   # Interval: 500,000 us = 2 Hz
+        108,
+        500_000,
         0, 0, 0, 0, 0,
     )
 
 
+def estimate_visual_fix(state, map_rgba, map_bgr, georef, fov_deg):
+    """Generate a synthetic camera frame and match it against the map."""
+    px_x, px_y = latlon_to_px(georef, state.lat, state.lon)
+    heading_deg = math.degrees(state.yaw_rad)
+    scale = compute_scale(state.alt_m, fov_deg, georef.gsd_x, FRAME_SIZE[0])
 
+    frame = render_frame(
+        map_bgr, px_x, px_y, heading_deg, scale, FRAME_SIZE, augment=True
+    )
+    if frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
+    return estimate_pose(frame, map_bgr, georef)
 
 
 def main():
     # ============================================================
-    # 1. INITIALIZATION — підключення до ArduPilot SITL
+    # 1. INITIALIZATION — підключення до SITL та завантаження карти
     # ============================================================
-
-    # Створюємо MAVLink-з'єднання через UDP.
-    # SITL надсилатиме телеметрію на порт 14551.
     connection = mavutil.mavlink_connection(
         "udpin:127.0.0.1:14551",
         source_system=245,
@@ -212,57 +184,42 @@ def main():
     )
 
     print("Waiting for SITL...")
-
-    # Чекаємо heartbeat від SITL максимум 15 секунд.
-    # Якщо повідомлення не прийшло — зупиняємо програму.
     heartbeat = connection.wait_heartbeat(timeout=15)
-
     if heartbeat is None:
         raise RuntimeError("No heartbeat from SITL")
 
     print("Connected to ArduPlane!")
-
-    # Запитуємо SIM_STATE з частотою 2 Hz.
     request_sim_state(connection)
 
-    # Завантажуємо карту, геоприв'язку та параметри камери.
     print("Loading map and georef...")
     map_rgba, map_bgr, georef, fov_deg = load_pipeline()
-
     print(
         f"Map loaded: {map_rgba.shape[1]}x{map_rgba.shape[0]}, "
         f"GSD={georef.gsd_x:.2f} m/px"
     )
 
     # ============================================================
-    # 2. STATE STORAGE — зберігання телеметрії та стану з'єднання
+    # 2. STATE STORAGE — кеш телеметрії та поточне джерело позиції
     # ============================================================
-
-    # Останнє отримане повідомлення кожного MAVLink-типу.
     messages = {}
+    last_received = {"HEARTBEAT": time.monotonic()}
 
-    # Час отримання кожного типу повідомлення.
-    # Використовуємо для перевірки актуальності даних.
-    last_received = {}
-
-    last_received["HEARTBEAT"] = time.monotonic()
-
-    # Контроль стану з'єднання.
     link_alive = True
-    heartbeat_timeout = 3.0  # секунди
+    heartbeat_timeout = 3.0
 
-    # Обмеження частоти надсилання GPS_INPUT.
+    # Діагностичне джерело: GPS, MATCHER або NO_FIX.
+    nav_source = None
+
+    # Окремо обмежуємо СПРОБИ matching і успішні GPS_INPUT.
+    # Так навіть при fix.ok=False ми не запускаємо matcher безперервно.
+    last_match_attempt = 0.0
     last_sent = 0.0
-    send_interval = 0.2  # мінімум 0.2 с між передачами (до 5 Hz)
+    match_interval = 0.2  # Максимум 5 спроб matching за секунду.
 
     # ============================================================
-    # 3. MAIN LOOP — постійне отримання MAVLink-повідомлень
+    # 3. MAIN LOOP — повідомлення MAVLink і вибір джерела позиції
     # ============================================================
-
     while True:
-
-        # Чекаємо одне повідомлення одного із зазначених типів.
-        # Якщо за 1 секунду нічого немає, msg буде None.
         msg = connection.recv_match(
             type=[
                 "HEARTBEAT",
@@ -275,266 +232,148 @@ def main():
             blocking=True,
             timeout=1,
         )
-
         now = time.monotonic()
 
-        # ========================================================
-        # 4. CONNECTION MONITORING — контроль зв'язку з SITL
-        # ========================================================
-
-        # Перевіряємо, чи отримали heartbeat саме від ArduPilot.
+        # --------------------------------------------------------
+        # 3.1. Перевірка heartbeat та відновлення після перезапуску
+        # --------------------------------------------------------
         if (
             msg is not None
             and msg.get_type() == "HEARTBEAT"
             and msg.autopilot == mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA
         ):
-
-            # Якщо зв'язок раніше був втрачений, але тепер
-            # з'явився — відновлюємо стан бріджа.
             if not link_alive:
                 print("SITL connection restored!")
-
-                # Оновлюємо ідентифікатори автопілота.
                 connection.target_system = msg.get_srcSystem()
                 connection.target_component = msg.get_srcComponent()
-
-                # Видаляємо стару телеметрію.
                 messages.clear()
                 last_received.clear()
+                last_match_attempt = 0.0
                 last_sent = 0.0
-
-                # Повторно запитуємо SIM_STATE.
+                nav_source = None
                 request_sim_state(connection)
 
-            # Запам'ятовуємо час останнього heartbeat.
             last_received["HEARTBEAT"] = now
             link_alive = True
 
-        # Якщо heartbeat не надходив понад 3 секунди,
-        # вважаємо, що з'єднання втрачено.
         if now - last_received["HEARTBEAT"] > heartbeat_timeout:
-
             if link_alive:
                 print("WARNING: SITL connection lost!")
-
-                # Старі повідомлення більше не використовуємо.
                 messages.clear()
-
+                nav_source = None
             link_alive = False
 
-        # Без з'єднання нічого далі не обробляємо.
-        # Переходимо до наступної ітерації while.
-        if not link_alive:
+        if not link_alive or msg is None:
             continue
 
-        # ========================================================
-        # 5. MESSAGE PROCESSING — обробка отриманої телеметрії
-        # ========================================================
+        # --------------------------------------------------------
+        # 3.2. Зберігання останнього повідомлення кожного типу
+        # --------------------------------------------------------
+        msg_type = msg.get_type()
+        messages[msg_type] = msg
+        if msg_type != "HEARTBEAT":
+            last_received[msg_type] = now
 
-        # Якщо цього разу повідомлення не отримали,
-        # пропускаємо всю подальшу обробку.
-        if msg is not None:
+        if msg_type == "GPS_RAW_INT":
+            gps = parse_gps(messages, last_received)
+            print(
+                f"GPS1: available={gps.available}, "
+                f"lat={gps.lat:.7f}, lon={gps.lon:.7f}, "
+                f"alt={gps.alt_m:.2f}"
+            )
+            continue
 
-            msg_type = msg.get_type()
+        if msg_type == "SIM_STATE":
+            print("TRUE SIM ALT:", msg.alt)
+            continue
 
-            # Зберігаємо останнє повідомлення цього типу.
-            messages[msg_type] = msg
+        # Увесь optical pipeline запускається тільки на новий SIMSTATE.
+        if msg_type != "SIMSTATE":
+            continue
 
-            # Оновлюємо час його отримання.
-            # HEARTBEAT вже обробляється окремо вище.
-            if msg_type != "HEARTBEAT":
-                last_received[msg_type] = time.monotonic()
+        # --------------------------------------------------------
+        # 3.3. Найвищий пріоритет: штатний GPS1
+        # --------------------------------------------------------
+        gps = parse_gps(messages, last_received)
+        if gps.available:
+            # GPS1 уже надходить у ArduPilot напряму.
+            # Не надсилаємо GPS_INPUT, поки він доступний.
+            if nav_source != "GPS":
+                print("NAV SOURCE -> GPS")
+                nav_source = "GPS"
+            continue
 
-            # ----------------------------------------------------
-            # 5.1. GPS telemetry — перевірка стану GPS
-            # ----------------------------------------------------
+        # --------------------------------------------------------
+        # 3.4. GPS немає: пробуємо visual matching
+        # --------------------------------------------------------
+        if now - last_match_attempt < match_interval:
+            continue
+        last_match_attempt = now
 
-            if msg_type == "GPS_RAW_INT":
+        state = parse_state(messages, last_received)
+        sim_state = messages.get("SIM_STATE")
+        sim_time = last_received.get("SIM_STATE")
 
-                # Перетворюємо GPS_RAW_INT на GpsMeasurement.
-                gps = parse_gps(messages, last_received)
+        # Потрібні свіжі дані та додатна висота для масштабу кадру.
+        if (
+            state is None
+            or sim_state is None
+            or sim_time is None
+            or now - sim_time > 2.0
+            or state.alt_m <= 0.0
+        ):
+            if nav_source != "NO_FIX":
+                print("NAV SOURCE -> NO_FIX (missing/stale simulator data)")
+                nav_source = "NO_FIX"
+            # TODO: visual odometry — оцінка переміщення між кадрами.
+            continue
 
-                # Поки що лише виводимо інформацію.
-                # У навігаційному алгоритмі gps не використовується.
-                print(
-                    f"GPS: available={gps.available}, "
-                    f"lat={gps.lat:.7f}, "
-                    f"lon={gps.lon:.7f}, "
-                    f"alt={gps.alt_m:.2f}"
-                )
+        # Функція повертає Fix(..., sigma_m, ok).
+        fix = estimate_visual_fix(state, map_rgba, map_bgr, georef, fov_deg)
 
-            # ----------------------------------------------------
-            # 5.2. SIM_STATE — отримання істинної висоти
-            # ----------------------------------------------------
+        # --------------------------------------------------------
+        # 3.5. Рішення matcher: перевіряємо ТІЛЬКИ fix.ok
+        # --------------------------------------------------------
+        # sigma_m не впливає на перемикання режимів. Її передаємо
+        # в ArduPilot як horiz_accuracy, без додаткового порога.
+        if not fix.ok:
+            if nav_source != "NO_FIX":
+                print("NAV SOURCE -> NO_FIX (matcher failed)")
+                nav_source = "NO_FIX"
+            # TODO: visual odometry — fallback, коли fix.ok=False.
+            continue
 
-            if msg_type == "SIM_STATE":
+        # --------------------------------------------------------
+        # 3.6. Успішний matcher: надсилаємо координати в GPS2
+        # --------------------------------------------------------
+        output = ModuleOutput(
+            lat=fix.lat,
+            lon=fix.lon,
+            alt_m=sim_state.alt,
+            heading_rad=fix.heading_rad,
+            sigma_m=fix.sigma_m,
+            module_status=ModuleStatus.FIX,
+        )
+        encoded = encode_output(output)
+        connection.mav.gps_input_send(**encoded)
 
-                # Висота з фізичної моделі симулятора.
-                print("TRUE SIM ALT:", msg.alt)
+        if nav_source != "MATCHER":
+            print("NAV SOURCE -> MATCHER")
+            nav_source = "MATCHER"
 
-            # ====================================================
-            # 6. OPTICAL PIPELINE — визначення позиції за кадром
-            # ====================================================
+        sent_at = time.monotonic()
+        if last_sent > 0:
+            frequency = 1.0 / (sent_at - last_sent)
+            print(f"GPS_INPUT frequency: {frequency:.2f} Hz")
+        last_sent = sent_at
 
-            # Увесь навігаційний pipeline запускається тільки
-            # після отримання нового SIMSTATE.
-            if msg_type == "SIMSTATE":
-
-                now = time.monotonic()
-
-                # ------------------------------------------------
-                # 6.1. Rate limiting — обмеження частоти
-                # ------------------------------------------------
-
-                # Якщо після останньої передачі минуло
-                # менше 0.2 с, пропускаємо цей цикл.
-                if now - last_sent < send_interval:
-                    continue
-
-                # ------------------------------------------------
-                # 6.2. Aircraft state — отримання стану літака
-                # ------------------------------------------------
-
-                # Отримуємо координати, висоту й орієнтацію.
-                # parse_state також перевіряє свіжість даних.
-                state = parse_state(messages, last_received)
-
-                # Якщо необхідних даних немає — пропускаємо цикл.
-                if state is None:
-                    continue
-
-                # Отримуємо останній SIM_STATE та час його приходу.
-                sim_state = messages.get("SIM_STATE")
-                sim_time = last_received.get("SIM_STATE")
-
-                # Без SIM_STATE не можемо сформувати вихідні дані.
-                if sim_state is None or sim_time is None:
-                    continue
-
-                # Не використовуємо SIM_STATE старший за 2 секунди.
-                if time.monotonic() - sim_time > 2.0:
-                    continue
-
-                # ------------------------------------------------
-                # 6.3. Frame preparation — підготовка кадру
-                # ------------------------------------------------
-
-                # Перетворюємо lat/lon на координати пікселів карти.
-                px_x, px_y = latlon_to_px(
-                    georef, state.lat, state.lon
-                )
-
-                # Переводимо курс із радіанів у градуси.
-                heading_deg = math.degrees(state.yaw_rad)
-
-                # Розраховуємо масштаб кадру за висотою,
-                # кутом огляду камери та роздільністю карти.
-                scale = compute_scale(
-                    state.alt_m,
-                    fov_deg,
-                    georef.gsd_x,
-                    FRAME_SIZE[0]
-                )
-
-                # Генеруємо синтетичне зображення з камери.
-                # augment=True додає реалістичні спотворення.
-                frame = render_frame(
-                    map_rgba,
-                    px_x,
-                    px_y,
-                    heading_deg,
-                    scale,
-                    FRAME_SIZE,
-                    augment=True
-                )
-
-                # ------------------------------------------------
-                # 6.4. Image format — підготовка для OpenCV
-                # ------------------------------------------------
-
-                # Якщо кадр має 4 канали (BGRA),
-                # перетворюємо його на 3-канальний BGR.
-                if frame.shape[2] == 4:
-                    frame_bgr = cv2.cvtColor(
-                        frame, cv2.COLOR_BGRA2BGR
-                    )
-                else:
-                    frame_bgr = frame
-
-                # ------------------------------------------------
-                # 6.5. Matching — пошук положення на карті
-                # ------------------------------------------------
-
-                # Зіставляємо кадр із референсною картою.
-                # Отримуємо координати, курс, похибку й статус.
-                fix = estimate_pose(frame_bgr, map_bgr, georef)
-
-                # Якщо позицію визначити не вдалося,
-                # не надсилаємо GPS_INPUT.
-                if not fix.ok:
-                    print("WARNING: matcher failed, skipping GPS_INPUT")
-                    continue
-
-                # ------------------------------------------------
-                # 6.6. Module output — формування результату
-                # ------------------------------------------------
-
-                # Створюємо результат роботи навігаційного модуля.
-                test_output = ModuleOutput(
-                    lat=fix.lat,
-                    lon=fix.lon,
-                    alt_m=sim_state.alt,
-                    heading_rad=fix.heading_rad,
-                    sigma_m=fix.sigma_m,
-                    module_status=ModuleStatus.FIX,
-                )
-
-                # Перевіряємо, чи результат має статус FIX.
-                # Наразі статус завжди FIX, тому перевірка
-                # фактично надлишкова.
-                if test_output.module_status != ModuleStatus.FIX:
-                    print("WARNING: No reliable position fix")
-                    continue
-
-                # ------------------------------------------------
-                # 6.7. MAVLink output — передача координат
-                # ------------------------------------------------
-
-                # Перетворюємо ModuleOutput на поля GPS_INPUT:
-                # координати, висоту, курс, похибку та час.
-                encoded = encode_output(test_output)
-
-                # Надсилаємо результат назад ArduPilot.
-                connection.mav.gps_input_send(**encoded)
-
-                # ------------------------------------------------
-                # 6.8. Logging — частота та вміст повідомлення
-                # ------------------------------------------------
-
-                now = time.monotonic()
-
-                # Обчислюємо фактичну частоту передачі.
-                if last_sent > 0:
-                    interval = now - last_sent
-                    frequency = 1.0 / interval
-
-                    print(f"GPS_INPUT frequency: {frequency:.2f} Hz")
-
-                # Запам'ятовуємо час останньої передачі.
-                last_sent = now
-
-                # Виводимо передані координати та похибку.
-                print(
-                    "GPS_INPUT prepared:",
-                    encoded["lat"],
-                    encoded["lon"],
-                    "alt:", encoded["alt"],
-                    "sigma:", f"{fix.sigma_m:.2f}m"
-                )
-
-
-
-        
+        print(
+            "MATCHER GPS_INPUT:",
+            encoded["lat"],
+            encoded["lon"],
+            "alt:", encoded["alt"],
+            "sigma:", f"{fix.sigma_m:.2f}m",
+        )
 
 
 if __name__ == "__main__":
