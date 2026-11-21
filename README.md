@@ -78,3 +78,42 @@ iface.mapCanvas().setCenter(QgsPointXY(1530500, 6625500))
 iface.mapCanvas().zoomScale(50000)
 iface.mapCanvas().refresh()
 ```
+
+# HOW TO START
+## Sitl start
+(in ardupilot directory)
+```bash
+Tools/autotest/sim_vehicle.py \
+  -v ArduPlane \
+  -N \
+  --console \
+  --map \
+  --out=udp:127.0.0.1:14551 \
+  --custom-location="51.0688,13.7198,200,0"
+```
+
+Make suret to GPS ON when started (just the same terminal where u have started the thing)
+```bash
+param set SIM_GPS1_ENABLE 1
+```
+
+загрузити маршрукт
+```
+wp load .../navigation/dresden_gps_test.waypoints
+```
+
+почати місію
+```
+mode auto
+arm throttle
+```
+to turn gps off
+```bash
+param set SIM_GPS1_ENABLE 0
+```
+
+## our stuff
+to start project
+```bash
+uv run python scripts/bridge.py  
+```
