@@ -49,7 +49,7 @@ def _match_core(frame, map_img, detector=None):
     if M is None or inliers is None:
         return None
 
-    return M, inliers, pts_frame, pts_map
+    return M, inliers, pts_frame, pts_map, len(good)
 
 
 def match_frame(frame, map_img, detector=None):
@@ -61,7 +61,7 @@ def match_frame(frame, map_img, detector=None):
     if result is None:
         return None
 
-    M = result[0]
+    M = result[0]  # (M, inliers, pts_frame, pts_map, n_total)
     h, w = frame.shape[:2]
     return M @ np.array([w / 2, h / 2, 1])
 
@@ -77,7 +77,7 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
     if result is None:
         return _NO_FIX
 
-    M, inliers, pts_frame, pts_map = result
+    M, inliers, pts_frame, pts_map, n_total = result
 
     # --- position: frame centre → map pixel → lat/lon ---
     h, w = frame.shape[:2]
@@ -112,4 +112,9 @@ def estimate_pose(frame, map_img, georef: MapGeoref, detector=None):
     # standard error of centre estimate ≈ rms / √n, floored at one pixel
     sigma_m = max(rms_px * avg_gsd / np.sqrt(n_inliers), avg_gsd)
 
-    return Fix(lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True)
+    inlier_ratio = n_inliers / n_total
+
+    return Fix(
+        lat=lat, lon=lon, heading_rad=heading_rad, sigma_m=sigma_m, ok=True,
+        n_inliers=n_inliers, inlier_ratio=inlier_ratio,
+    )

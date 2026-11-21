@@ -125,6 +125,13 @@ class TestEstimatePose:
         assert fix.ok
         assert 0 < fix.sigma_m < 50, f"sigma_m {fix.sigma_m:.2f} out of reasonable range"
 
+    def test_inlier_stats(self, synth_map):
+        frame = render_frame(synth_map, 1000, 1000, heading_deg=0, scale=1, size=FRAME_SIZE)
+        fix = estimate_pose(frame, synth_map, SYNTH_GEOREF)
+        assert fix.ok
+        assert fix.n_inliers > 0
+        assert 0 < fix.inlier_ratio <= 1.0
+
     def test_blank_frame_no_fix(self, synth_map):
         blank = np.zeros((*FRAME_SIZE, 3), dtype=np.uint8)
         fix = estimate_pose(blank, synth_map, SYNTH_GEOREF)
