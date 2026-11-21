@@ -473,6 +473,7 @@ def _run_bridge(logger):
                                         yaw_rad=attitude.yaw,
                                         gt_lat=gt["lat"],
                                         gt_lon=gt["lon"],
+                                        gt_yaw_rad=gt["yaw_rad"],
                                         simstate_age_ms=(
                                             now - simstate_rx
                                         ) * 1000.0,

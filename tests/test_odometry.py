@@ -129,3 +129,52 @@ def test_metric_velocity():
 
     assert abs(result.ve_mps - (-6 * gsd / 0.2)) < gsd / 0.2
     assert abs(result.vn_mps - (4 * gsd / 0.2)) < gsd / 0.2
+
+
+
+from navmod.camera import render_frame
+
+
+def test_visual_yaw_rotation():
+    rng = np.random.default_rng(42)
+
+    map_img = rng.integers(
+        0, 255, (900, 900), dtype=np.uint8
+    )
+    map_img = cv2.GaussianBlur(
+        map_img, (5, 5), 0
+    )
+
+    # Камера повертається на 3 градуси,
+    # але її координати не змінюються.
+    img0 = render_frame(
+        map_img, 450, 450,
+        heading_deg=0,
+        size=(512, 512),
+    )
+    img1 = render_frame(
+        map_img, 450, 450,
+        heading_deg=3,
+        size=(512, 512),
+    )
+
+    vo = VisualOdometry()
+
+    vo.update(CameraFrame(
+        image=img0,
+        timestamp_s=1.0,
+        height_agl_m=100,
+        frame_id=0,
+    ))
+
+    result = vo.update(CameraFrame(
+        image=img1,
+        timestamp_s=1.2,
+        height_agl_m=100,
+        frame_id=1,
+    ))
+
+    assert result.ok
+    assert abs(
+        math.degrees(result.delta_yaw_rad) - 3
+    ) < 0.5

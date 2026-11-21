@@ -25,7 +25,8 @@ class VODiagnosticRunner:
         "sigma_delta_m", "sigma_m", "n_tracked", "n_inliers",
         "inlier_ratio", "rms_px", "gt_east_m", "gt_north_m",
         "position_error_m", "vo_time_ms", "simstate_age_ms",
-        "attitude_age_ms",
+        "attitude_age_ms", "attitude_yaw_rad", "gt_yaw_rad",
+        "yaw_diff_deg", "wall_dt_s",
     )
 
     def __init__(
@@ -49,6 +50,7 @@ class VODiagnosticRunner:
         self._needs_reset = False
         self._gt_origin: tuple[float, float] | None = None
         self._previous_yaw: float | None = None
+        self._previous_wall_s: float | None = None
 
     def mark_gap(self) -> None:
         """Next frame must start a new segment (link loss / missing attitude)."""
@@ -62,10 +64,19 @@ class VODiagnosticRunner:
         self, frame: CameraFrame, yaw_rad: float, gt_lat: float,
         gt_lon: float, simstate_age_ms: float = float("nan"),
         attitude_age_ms: float = float("nan"),
+        gt_yaw_rad: float = float("nan"),
     ) -> dict:
         """Process a unique camera frame; truth is used ONLY for error metrics."""
         if not all(math.isfinite(x) for x in (yaw_rad, gt_lat, gt_lon)):
             raise ValueError("Expected finite attitude yaw and SITL truth for diagnostics")
+
+        # Monitor real elapsed time between processed frames.
+        wall_now = time.monotonic()
+        wall_dt_s = (
+            wall_now - self._previous_wall_s
+            if self._previous_wall_s is not None else float("nan")
+        )
+        self._previous_wall_s = wall_now
 
         if self._needs_reset:
             self.vo.reset()
@@ -131,6 +142,13 @@ class VODiagnosticRunner:
             "vo_time_ms": duration_ms,
             "simstate_age_ms": self._finite(simstate_age_ms),
             "attitude_age_ms": self._finite(attitude_age_ms),
+            "attitude_yaw_rad": yaw_rad,
+            "gt_yaw_rad": self._finite(gt_yaw_rad),
+            "yaw_diff_deg": self._finite(math.degrees(math.atan2(
+                math.sin(yaw_rad - gt_yaw_rad),
+                math.cos(yaw_rad - gt_yaw_rad),
+            )) if math.isfinite(gt_yaw_rad) else float("nan")),
+            "wall_dt_s": self._finite(wall_dt_s),
         }
         self._writer.writerow(row)
         self._pending += 1

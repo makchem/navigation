@@ -39,6 +39,8 @@ class FlowResult:
     sigma_delta_m: float = float("inf")
     sigma_m: float = float("inf")
 
+    delta_yaw_rad: float = float("nan")
+
 
 
 def camera_gsd(
@@ -209,6 +211,10 @@ class VisualOdometry:
         A = M[:, :2]
         t = M[:, 2]
 
+        # Relative camera yaw from affine rotation.
+        # Sign follows our synthetic render_frame convention.
+        delta_yaw_rad = -math.atan2(A[1, 0], A[0, 0])
+
         h, w = gray.shape
         center = np.array([w / 2, h / 2])
 
@@ -232,8 +238,9 @@ class VisualOdometry:
         dx_px = float(previous_center[0] - center[0])
         dy_px = float(previous_center[1] - center[1])
 
-        # 7. Середня висота між кадрами
-        height_m = (prev_height + frame.height_agl_m) / 2
+        # 7. Pixel shift is expressed in the PREVIOUS frame's coordinates.
+        # Use its altitude to calculate metres per pixel.
+        height_m = prev_height
 
         if not np.isfinite(height_m) or height_m <= 0:
             return FlowResult(dt_s=dt)
@@ -269,6 +276,7 @@ class VisualOdometry:
             delta_north_m=delta_north,
             ve_mps=ve,
             vn_mps=vn,
+            delta_yaw_rad=delta_yaw_rad,
         )
 
 
@@ -295,7 +303,8 @@ class VisualOdometry:
             # We may have a good *relative* shift but no valid accumulated pose.
             return replace(flow, ok=False, sigma_m=float("inf"))
 
-        height_m = (prev_height + frame.height_agl_m) / 2.0
+        # Match the GSD used for the previous frame's pixel displacement.
+        height_m = prev_height
         height_px, width_px = frame.image.shape[:2]
         gsd = camera_gsd(height_m, self.fov_diag_deg, width_px, height_px)
         step_m = math.hypot(flow.delta_east_m, flow.delta_north_m)
