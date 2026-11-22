@@ -4,6 +4,10 @@ import math
 import os
 import time
 import sys
+import csv
+import json
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -16,14 +20,10 @@ from navmod.matcher import estimate_pose
 from navmod.odometry import camera_gsd
 from navmod.vo_diagnostics import VODiagnosticRunner
 from navmod.vo_gps2 import VOGps2Adapter
-from navmod.types import State, GpsMeasurement, ModuleOutput, ModuleStatus, Fix
+from navmod.vo_mavlink import ExternalNavPublisher
+from navmod.matcher_vo_fusion import MatcherFirstFusion
 from navmod.types import (
-    State,
-    GpsMeasurement,
-    ModuleOutput,
-    ModuleStatus,
-    Fix,
-    CameraFrame,
+    State, GpsMeasurement, ModuleOutput, ModuleStatus, Fix, CameraFrame,
 )
 
 # src/logger.py is a standalone module, not a submodule of navmod.
@@ -36,6 +36,15 @@ GPS_INPUT_GPS_ID = 1  # GPS2: GPS1 залишаємо для штатного GP
 GPS2_SOURCE = os.getenv("NAVMOD_GPS2_SOURCE", "matcher").lower()
 if GPS2_SOURCE not in {"matcher", "vo"}:
     raise ValueError("NAVMOD_GPS2_SOURCE must be matcher or vo")
+NAVMOD_NAV_OUTPUT = os.getenv("NAVMOD_NAV_OUTPUT", "gps2").lower()
+if NAVMOD_NAV_OUTPUT not in {"gps2", "externalnav"}:
+    raise ValueError("NAVMOD_NAV_OUTPUT must be gps2 or externalnav")
+EXTERNALNAV_MODE = NAVMOD_NAV_OUTPUT == "externalnav"
+# Matcher runs separately from the 5 Hz VO loop.  A late match is corrected
+# to the frame on which it was computed (using a VO snapshot).
+MATCHER_RATE_HZ = max(0.2, float(os.getenv("NAVMOD_MATCH_HZ", "1.5")))
+# Diagnostic-only UDP. Never enters ArduPilot or changes EKF sources.
+MATCHER_MAP_PORT = int(os.getenv("NAVMOD_MATCHER_MAP_PORT", "15379"))
 
 
 def load_pipeline(config_path="config/default.yaml"):
@@ -336,8 +345,35 @@ def _run_bridge(logger):
     )
     print(f"VO diagnostic log: {vo_diag.path}")
     vo_gps = VOGps2Adapter(georef)
+    external_pub = ExternalNavPublisher(min_good_frames=12)
+    fusion = MatcherFirstFusion(georef)
+    match_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="map-matcher") if EXTERNALNAV_MODE else None
+    match_future = None
+    match_snapshot = None
+    last_match_submit = float("-inf")
+    # Send accepted raw matcher fixes to a local MAVProxy map plugin.
+    # This socket NEVER sends GPS_INPUT or ODOMETRY to the vehicle.
+    matcher_map_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if EXTERNALNAV_MODE else None
+    matcher_map_packets = 0
+    match_log = None
+    match_writer = None
+    if EXTERNALNAV_MODE:
+        match_path = logger.path.with_name(logger.path.stem + "_matcher_async.csv")
+        match_log = match_path.open("x", newline="", encoding="utf-8")
+        match_writer = csv.DictWriter(match_log, fieldnames=(
+            "frame_id", "t_capture_s", "t_received_s", "age_s",
+            "ok", "accepted", "reason", "innovation_m",
+            "fix_lat", "fix_lon", "n_inliers", "inlier_ratio",
+        ))
+        match_writer.writeheader()
+        print(f"Async matcher diagnostics: {match_path}")
+    if EXTERNALNAV_MODE:
+        print("ExternalNav ODOMETRY: enabled (source selection remains MANUAL)")
     print(f"GPS2 optical source: {GPS2_SOURCE.upper()} (SITL test)")
     last_vo_simstate_rx = None
+
+    last_ground_odom_tx = 0.0
+    ground_bootstrap_active = False
 
     messages = {}
     last_received = {"HEARTBEAT": time.monotonic()}
@@ -378,6 +414,8 @@ def _run_bridge(logger):
                     nav_source = None
                     vo_diag.mark_gap()
                     vo_gps.reset()
+                    external_pub.reset()
+                    fusion.reset()
                     last_vo_simstate_rx = None
                     connection.target_system = msg.get_srcSystem()
                     connection.target_component = msg.get_srcComponent()
@@ -391,6 +429,8 @@ def _run_bridge(logger):
                     messages.clear()
                     vo_diag.mark_gap()
                     vo_gps.reset()
+                    external_pub.reset()
+                    fusion.reset()
                     last_vo_simstate_rx = None
                 link_alive = False
                 continue
@@ -413,7 +453,81 @@ def _run_bridge(logger):
                 continue
 
             gps = parse_gps(messages, last_received)
-            if gps.available and now - last_relay_sent >= relay_interval:
+            if EXTERNALNAV_MODE:
+                fusion.seed_origin(gps)
+
+            # SITL-only pre-arm ExternalNav bootstrap.
+            # Use a stationary local pose while the aircraft is disarmed.
+            if EXTERNALNAV_MODE:
+                hb = messages.get("HEARTBEAT")
+                armed = (
+                    hb is not None
+                    and bool(
+                        hb.base_mode
+                        & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+                    )
+                )
+
+                att = _fresh(
+                    messages, last_received,
+                    "ATTITUDE", now, max_age=0.3,
+                )
+
+                if (
+                    not armed
+                    and gps.available
+                    and att is not None
+                    and now - last_ground_odom_tx >= 0.1
+                ):
+                    q = external_pub._quaternion(
+                        att.roll, att.pitch, att.yaw
+                    )
+                    
+                    # All covariance values must be finite.
+                    cov = [0.0] * 21
+
+                    # Position variances, m²
+                    cov[0] = 25.0
+                    cov[6] = 25.0
+                    cov[11] = 100.0
+
+                    # Angular variances, rad²
+                    cov[15] = math.radians(15.0) ** 2
+                    cov[18] = math.radians(15.0) ** 2
+                    cov[20] = math.radians(30.0) ** 2
+
+                    # Velocity variances
+                    vel_cov = [0.0] * 21
+                    vel_cov[0] = 4.0
+                    vel_cov[6] = 4.0
+                    vel_cov[11] = 4.0
+
+                    connection.mav.odometry_send(
+                        time_usec=time.monotonic_ns() // 1000,
+                        frame_id=20,
+                        child_frame_id=12,
+                        x=0.0, y=0.0, z=0.0,
+                        q=list(q),
+                        vx=0.0, vy=0.0, vz=0.0,
+                        rollspeed=0.0,
+                        pitchspeed=0.0,
+                        yawspeed=0.0,
+                        pose_covariance=cov,
+                        velocity_covariance=vel_cov,
+                        reset_counter=external_pub.reset_counter,
+                        estimator_type=0,
+                        quality=0,
+                    )
+
+                    last_ground_odom_tx = now
+                    ground_bootstrap_active = True
+
+                elif armed and ground_bootstrap_active:
+                    external_pub.reset()
+                    ground_bootstrap_active = False
+
+            if (not EXTERNALNAV_MODE and gps.available
+                    and now - last_relay_sent >= relay_interval):
                 # GPS1->GPS2 bootstrap (SITL only), never counted as matcher sent_to_ekf.
                 try:
                     relay_gps1_to_gps2(connection, gps, messages["GPS_RAW_INT"])
@@ -445,9 +559,66 @@ def _run_bridge(logger):
             sent_to_ekf = False
             optical_tx_source = ""
             vo_row = None
+            attitude = None
 
-            # Diagnostic matching always runs when the camera state is valid,
-            # including while GPS1 is ON. This does NOT change GPS1 priority.
+            # Collect completed asynchronous map match; associate it with the
+            # image capture timestamp, not with this loop's current frame.
+            if EXTERNALNAV_MODE and match_future is not None and match_future.done():
+                try:
+                    fix = match_future.result()
+                    decision = fusion.accept_match(fix, match_snapshot, t_sim)
+                except Exception as exc:
+                    decision = None
+                    print(f"Async matcher error: {exc}")
+                if decision is not None:
+                    match_writer.writerow({
+                        "frame_id": match_snapshot.frame_id,
+                        "t_capture_s": match_snapshot.t_sim,
+                        "t_received_s": t_sim,
+                        "age_s": t_sim - match_snapshot.t_sim,
+                        "ok": bool(fix.ok),
+                        "accepted": decision.accepted,
+                        "reason": decision.reason,
+                        "innovation_m": decision.innovation_m if decision.innovation_m is not None else "",
+                        "fix_lat": fix.lat if fix.ok else "",
+                        "fix_lon": fix.lon if fix.ok else "",
+                        "n_inliers": fix.n_inliers,
+                        "inlier_ratio": fix.inlier_ratio,
+                    })
+                    match_log.flush()
+                    if decision.accepted:
+                        print(f"MATCHER fix accepted frame={match_snapshot.frame_id} "
+                              f"age={t_sim-match_snapshot.t_sim:.2f}s "
+                              f"innovation={decision.innovation_m}")
+                        # Independent visual marker for the RAW matcher position.
+                        # Do not repurpose GPS2: the EKF remains on ExternalNav.
+                        if matcher_map_socket is not None and fix.ok:
+                            try:
+                                heading = math.degrees(float(fix.heading_rad))
+                                if not math.isfinite(heading):
+                                    heading = 0.0
+                                marker = {
+                                    "type": "matcher_fix",
+                                    "lat": float(fix.lat),
+                                    "lon": float(fix.lon),
+                                    "heading_deg": heading % 360.0,
+                                    "frame_id": int(match_snapshot.frame_id),
+                                    "age_s": max(0.0, t_sim - match_snapshot.t_sim),
+                                }
+                                if all(math.isfinite(marker[k]) for k in
+                                       ("lat", "lon", "heading_deg", "age_s")):
+                                    matcher_map_socket.sendto(
+                                        json.dumps(marker).encode("utf-8"),
+                                        ("127.0.0.1", MATCHER_MAP_PORT),
+                                    )
+                                    matcher_map_packets += 1
+                            except (OSError, TypeError, ValueError) as map_exc:
+                                print(f"Matcher map telemetry warning: {map_exc}")
+                match_future = None
+                match_snapshot = None
+
+            # VO runs on fresh SIMSTATE frames.  Matcher independently runs
+            # asynchronously on the same camera frames (including with GPS1).
             if state is not None:
                 try:
                     image = generate_camera_frame(
@@ -481,7 +652,8 @@ def _run_bridge(logger):
                                     # True lat/lon is used ONLY by the CSV scorer.
                                     vo_row = vo_diag.observe(
                                         camera_frame,
-                                        yaw_rad=gt["yaw_rad"],
+                                        yaw_rad=(attitude.yaw if EXTERNALNAV_MODE
+                                                 else gt["yaw_rad"]),
                                         gt_lat=gt["lat"],
                                         gt_lon=gt["lon"],
                                         gt_yaw_rad=gt["yaw_rad"],
@@ -496,22 +668,65 @@ def _run_bridge(logger):
                                     print(f"VO diagnostic error: {vo_exc}")
                                     vo_diag.mark_gap()
 
-                    fix = estimate_pose(
-                        camera_frame.image,
-                        map_bgr,
-                        georef,
-                    )
-
-                    # Майбутня Visual Odometry:
-                    # vo_result = odometry.update(camera_frame)
+                    if EXTERNALNAV_MODE:
+                        # A fast VO tick never waits for ORB matching.
+                        # Schedule only when this is a new, VO-processed image;
+                        # keep at most ONE matcher job in flight.
+                        snap = fusion.observe_frame(vo_row, gps)
+                        if (snap is not None
+                                and match_future is None
+                                and now - last_match_submit >= 1.0 / MATCHER_RATE_HZ):
+                            match_snapshot = snap
+                            match_future = match_executor.submit(
+                                estimate_pose, camera_frame.image.copy(), map_bgr, georef
+                            )
+                            last_match_submit = now
+                    else:
+                        fix = estimate_pose(camera_frame.image, map_bgr, georef)
 
                 except Exception as exc:
                     print(f"Visual pipeline error: {exc}")
 
             vo_fix = (vo_gps.update(vo_row=vo_row, gps=gps, matcher_fix=fix)
-                      if GPS2_SOURCE == "vo" else None)
+                      if GPS2_SOURCE == "vo" and not EXTERNALNAV_MODE else None)
 
-            if gps.available:
+            if EXTERNALNAV_MODE:
+                # This only transmits ExternalNav. The user must switch
+                # EKF source set separately after verifying health.
+                payload = external_pub.payload(vo_row, attitude)
+                fused = fusion.fused_ned(vo_row) if payload is not None else None
+                if payload is not None and fused is not None:
+                    fused_n, fused_e, fused_source, correction_residual = fused
+                    # Keep ONE consistent local NED frame; matcher corrects the
+                    # absolute drift, VO propagates every new valid image.
+                    payload["x"] = fused_n
+                    payload["y"] = fused_e
+                    # Never transmit NaN covariance entries to ArduPilot.
+                    velcov = [0.0] * 21
+                    velcov[0] = velcov[6] = 9.0   # (3 m/s)^2, provisional
+                    velcov[11] = 25.0            # vertical speed not estimated
+                    payload["velocity_covariance"] = velcov
+                    # During a significant matcher correction, do not claim
+                    # high precision to EKF.
+                    if correction_residual > 1.0:
+                        posecov = list(payload["pose_covariance"])
+                        var = max(posecov[0], min(correction_residual, 40.0)**2)
+                        posecov[0] = posecov[6] = var
+                        payload["pose_covariance"] = posecov
+                    try:
+                        connection.mav.odometry_send(**payload)
+                    except Exception as exc:
+                        print(f"ExternalNav ODOMETRY send failed: {exc}")
+                    else:
+                        sent_to_ekf = True  # sent, NOT proof of EKF fusion
+                        optical_tx_source = fused_source
+                        if now - last_vo_report > 2.0:
+                            print(f"FUSED ODOMETRY: source={fused_source} "
+                                  f"segment={vo_row['segment_id']} "
+                                  f"correction={correction_residual:.1f}m "
+                                  f"reset={payload['reset_counter']}")
+                            last_vo_report = now
+            elif gps.available:
                 if nav_source != "GPS":
                     nav_source = "GPS"
                     print("NAV SOURCE -> GPS (GPS2 relay active)")
@@ -581,6 +796,13 @@ def _run_bridge(logger):
             frame_id += 1
     finally:
         vo_diag.close()
+        if match_log is not None:
+            match_log.flush()
+            match_log.close()
+        if match_executor is not None:
+            match_executor.shutdown(wait=False, cancel_futures=True)
+        if matcher_map_socket is not None:
+            matcher_map_socket.close()
         # The with-block in main() closes and flushes CSV, even on Ctrl+C.
         connection.close()
 

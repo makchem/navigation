@@ -83,6 +83,7 @@ iface.mapCanvas().refresh()
 ## Sitl start
 (in ardupilot directory)
 ```bash
+PYTHONPATH="$HOME/Prog/MyStuff/navigation/scripts${PYTHONPATH:+:$PYTHONPATH}" \
 Tools/autotest/sim_vehicle.py \
   -v ArduPlane \
   -N \
@@ -90,6 +91,12 @@ Tools/autotest/sim_vehicle.py \
   --map \
   --out=udp:127.0.0.1:14551 \
   --custom-location="51.0688,13.7198,200,0"
+```
+
+
+then put this in simu console to make turn on the visualisation of matching.
+```
+module load matcherview
 ```
 
 Make suret to GPS ON when started (just the same terminal where u have started the thing)
@@ -115,5 +122,5 @@ param set SIM_GPS1_ENABLE 0
 ## our stuff
 to start project
 ```bash
-uv run python scripts/bridge.py  
+NAVMOD_NAV_OUTPUT=externalnav uv run python scripts/bridge.py
 ```
